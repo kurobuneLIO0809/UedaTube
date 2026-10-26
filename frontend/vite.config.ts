@@ -20,7 +20,9 @@ function cspPlugin(apiBase: string): Plugin {
     transformIndexHtml: (html) => {
       const csp = [
         "default-src 'self'",
-        "script-src 'self'",
+        // FFmpeg.wasm（動画変換）の WebAssembly 実行に必要
+        "script-src 'self' 'wasm-unsafe-eval'",
+        "worker-src 'self' blob:",
         "style-src 'self' 'unsafe-inline'",
         `img-src 'self' data: blob: ${origin}`,
         `media-src 'self' blob: ${origin}`,
@@ -49,6 +51,9 @@ export default defineConfig(({ mode }) => {
     plugins: [react(), cspPlugin(env.VITE_API_BASE_URL || "http://localhost:8787")],
     server: { port: 5173, fs: { allow: [".."] } },
     build: { target: "es2022", sourcemap: false },
+    // FFmpeg.wasm は内部で Web Worker を使うため、事前バンドルの対象外にする
+    optimizeDeps: { exclude: ["@ffmpeg/ffmpeg", "@ffmpeg/util"] },
+    worker: { format: "es" },
     test: {
       environment: "jsdom",
       setupFiles: ["./src/test/setup.ts"],

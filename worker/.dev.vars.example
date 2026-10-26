@@ -10,3 +10,6 @@
 VIEWER_PASSPHRASE=
 ADMIN_PASSPHRASE=
 SESSION_SECRET=
+
+# ローカル開発で画面（http://localhost:5173）から API を呼べるようにする設定（秘密情報ではありません）
+ALLOWED_ORIGINS=http://localhost:5173

@@ -30,6 +30,10 @@ export interface VideoRow {
   deleteAttempts: number;
   lastDeleteError: string | null;
   updatedAt: number;
+  sourceWidth: number | null;
+  sourceHeight: number | null;
+  sourceCodec: string | null;
+  transcoded: number;
 }
 
 export interface CommentRow {
@@ -112,6 +116,8 @@ export function adminVideo(v: VideoRow, commentCount: number, nowMs: number) {
     deleteAttempts: v.deleteAttempts,
     lastDeleteError: v.lastDeleteError,
     expired: v.expiresAt !== null && nowMs >= v.expiresAt,
+    // 元動画の参考情報（自動変換した場合）
+    source: { width: v.sourceWidth, height: v.sourceHeight, codec: v.sourceCodec, transcoded: v.transcoded === 1 },
   };
 }
 

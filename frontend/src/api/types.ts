@@ -34,6 +34,8 @@ export interface AdminVideo extends Video {
   deleteAttempts: number;
   lastDeleteError: string | null;
   expired: boolean;
+  /** 元動画の参考情報（自動変換した場合など） */
+  source?: { width: number | null; height: number | null; codec: string | null; transcoded: boolean };
 }
 
 export interface Comment {

@@ -3,7 +3,7 @@ import { ALLOWED_THUMBNAIL_MIME, ALLOWED_VIDEO_MIME, MAX_THUMBNAIL_BYTES } from 
 import { Mp4Error, assertSupportedMp4, parseMp4, type ByteReader } from "../../../shared/mp4";
 import { validateVideoMeta } from "../../../shared/validation";
 import { requireSession } from "../auth";
-import { computeExpiresAt, deleteVideoCompletely, runCleanup } from "../cleanup";
+import { STALE_UPLOAD_MS, computeExpiresAt, deleteVideoCompletely, runCleanup } from "../cleanup";
 import { getConfig } from "../config";
 import {
   UUID_RE,
@@ -56,6 +56,35 @@ function r2Reader(bucket: R2Bucket, key: string, size: number): ByteReader {
   };
 }
 
+/** 同時に進行できるアップロード（status = 'uploading'）の上限 */
+export const MAX_CONCURRENT_UPLOADS = 3;
+
+/**
+ * 元動画の情報（任意）。ブラウザで自動変換した場合に、変換前の解像度などを管理者向けに記録する。
+ * 参考情報であり、保存される動画の検査には使わない（検査は complete 時にサーバーが実ファイルで行う）。
+ */
+function parseSource(raw: unknown, errors: string[]) {
+  const out = { width: null as number | null, height: null as number | null, codec: null as string | null, transcoded: false };
+  if (raw === undefined || raw === null) return out;
+  if (typeof raw !== "object") {
+    errors.push("元動画の情報の形式が不正です。");
+    return out;
+  }
+  const r = raw as Record<string, unknown>;
+  const dim = (v: unknown) => (Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 16384 ? (v as number) : null);
+  if (r.width !== undefined && r.width !== null && dim(r.width) === null) errors.push("元動画の幅が不正です。");
+  if (r.height !== undefined && r.height !== null && dim(r.height) === null) errors.push("元動画の高さが不正です。");
+  if (r.codec !== undefined && r.codec !== null && (typeof r.codec !== "string" || !/^[A-Za-z0-9 ._-]{1,32}$/.test(r.codec))) {
+    errors.push("元動画のコーデック名が不正です。");
+  }
+  if (r.transcoded !== undefined && typeof r.transcoded !== "boolean") errors.push("変換の有無の値が不正です。");
+  out.width = dim(r.width);
+  out.height = dim(r.height);
+  out.codec = typeof r.codec === "string" && /^[A-Za-z0-9 ._-]{1,32}$/.test(r.codec) ? r.codec : null;
+  out.transcoded = r.transcoded === true;
+  return out;
+}
+
 /** POST /api/admin/videos アップロードの開始（R2マルチパートアップロードを作成） */
 export async function createUpload(ctx: Ctx): Promise<Response> {
   await admin(ctx);
@@ -73,8 +102,21 @@ export async function createUpload(ctx: Ctx): Promise<Response> {
   else if ((fileSize as number) > cfg.maxUploadBytes) {
     errors.push(`ファイルサイズが上限（${Math.floor(cfg.maxUploadBytes / 1024 / 1024)}MB）を超えています。`);
   }
+  const source = parseSource(body.source, errors);
   if (errors.length) throw new HttpError(400, "INVALID_INPUT", errors[0], errors);
   const publish = body.publish !== false;
+
+  // 同時に進行できるアップロード数を制限する（放置されたものは24時間後に自動削除）
+  const active = await env.DB.prepare("SELECT COUNT(*) AS n FROM videos WHERE status = 'uploading' AND createdAt > ?1")
+    .bind(now - STALE_UPLOAD_MS)
+    .first<{ n: number }>();
+  if ((active?.n ?? 0) >= MAX_CONCURRENT_UPLOADS) {
+    throw new HttpError(
+      429,
+      "TOO_MANY_UPLOADS",
+      `同時に進行できるアップロードは${MAX_CONCURRENT_UPLOADS}件までです。進行中のアップロードが終わるか、管理画面で中止してから再度お試しください。`,
+    );
+  }
 
   const id = crypto.randomUUID();
   const key = videoKey(id);
@@ -82,10 +124,26 @@ export async function createUpload(ctx: Ctx): Promise<Response> {
   try {
     await env.DB.prepare(
       `INSERT INTO videos (id, title, description, category, r2Key, fileSize, contentType, uploadId, partSize,
-         createdAt, status, publishOnComplete, commentsEnabled, updatedAt)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'uploading', ?11, 1, ?10)`,
+         createdAt, status, publishOnComplete, commentsEnabled, updatedAt, sourceWidth, sourceHeight, sourceCodec, transcoded)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'uploading', ?11, 1, ?10, ?12, ?13, ?14, ?15)`,
     )
-      .bind(id, meta.value.title, meta.value.description ?? "", meta.value.category, key, fileSize, ALLOWED_VIDEO_MIME, upload.uploadId, cfg.uploadPartBytes, now, publish ? 1 : 0)
+      .bind(
+        id,
+        meta.value.title,
+        meta.value.description ?? "",
+        meta.value.category,
+        key,
+        fileSize,
+        ALLOWED_VIDEO_MIME,
+        upload.uploadId,
+        cfg.uploadPartBytes,
+        now,
+        publish ? 1 : 0,
+        source.width,
+        source.height,
+        source.codec,
+        source.transcoded ? 1 : 0,
+      )
       .run();
   } catch (err) {
     // D1への登録に失敗した場合はR2側を中止して孤立させない
