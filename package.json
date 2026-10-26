@@ -1,0 +1,20 @@
+{
+  "name": "school-nico",
+  "private": true,
+  "version": "1.0.0",
+  "description": "学校専用のニコニコ風コメント付き動画共有サイト（GitHub Pages + Cloudflare Workers / D1 / R2）",
+  "scripts": {
+    "install:all": "npm --prefix worker ci && npm --prefix frontend ci",
+    "dev:api": "npm --prefix worker run dev",
+    "dev:web": "npm --prefix frontend run dev",
+    "db:migrate:local": "npm --prefix worker run db:migrate:local",
+    "test": "npm run test:shared-and-web && npm run test:api",
+    "test:api": "npm --prefix worker test",
+    "test:shared-and-web": "npm --prefix frontend test",
+    "typecheck": "npm --prefix worker run typecheck && npm --prefix frontend run typecheck",
+    "build": "npm run typecheck && npm --prefix frontend run build && npm --prefix worker run build"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

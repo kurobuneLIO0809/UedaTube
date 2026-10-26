@@ -1,0 +1,29 @@
+# テスト・型チェック・ビルドを自動で実行します（秘密情報は使いません）
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            worker/package-lock.json
+            frontend/package-lock.json
+      - name: 依存関係のインストール
+        run: npm run install:all
+      - name: テスト（フロントエンド・共通ロジック・Worker API）
+        run: npm test
+      - name: 型チェックとビルド
+        run: npm run build

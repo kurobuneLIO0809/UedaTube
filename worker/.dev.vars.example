@@ -1,0 +1,12 @@
+# ローカル開発（npx wrangler dev）専用の秘密情報ファイルの見本です。
+# このファイルを .dev.vars という名前でコピーし、値を自分で決めて書き換えてください。
+# .dev.vars は .gitignore 済みで、GitHubにはコミットされません。
+# 本番環境では .dev.vars を使わず、`npx wrangler secret put <名前>` で登録します。
+#
+# VIEWER_PASSPHRASE: 生徒・先生が入力する閲覧用の合言葉（8文字以上）
+# ADMIN_PASSPHRASE : 管理者用の合言葉（8文字以上、閲覧用とは別のもの）
+# SESSION_SECRET   : トークン署名用のランダムな文字列（32文字以上）
+#                    例: node -e "console.log(require('crypto').randomBytes(32).toString('base64url'))"
+VIEWER_PASSPHRASE=
+ADMIN_PASSPHRASE=
+SESSION_SECRET=
