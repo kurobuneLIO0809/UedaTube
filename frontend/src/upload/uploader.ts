@@ -10,6 +10,8 @@ export interface UploadMeta {
   description: string;
   category: string;
   publish: boolean;
+  /** 元動画の参考情報（ブラウザで自動変換した場合など）。保存される動画の検査はサーバーが行う */
+  source?: { width: number | null; height: number | null; codec: string | null; transcoded: boolean };
 }
 
 export interface UploadProgress {
@@ -91,7 +93,13 @@ export class VideoUpload {
         const r = await request<{ videoId: string; partSize: number; partCount: number }>("/api/admin/videos", {
           method: "POST",
           auth: "admin",
-          json: { ...this.meta, fileName: this.file.name, fileSize: this.file.size, contentType: "video/mp4" },
+          json: {
+            ...this.meta,
+            // 中身が MP4 であることは検査済み。拡張子が .m4v などの場合も .mp4 として登録する
+            fileName: this.file.name.replace(/\.[^.]*$/, "") + ".mp4",
+            fileSize: this.file.size,
+            contentType: "video/mp4",
+          },
           signal,
         });
         this.videoId = r.videoId;

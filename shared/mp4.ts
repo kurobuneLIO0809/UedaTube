@@ -261,21 +261,21 @@ export function assertSupportedMp4(info: Mp4Info): void {
           : info.videoCodec || "不明";
     throw new Mp4Error(
       "UNSUPPORTED_VIDEO_CODEC",
-      `映像コーデック「${name}」には対応していません。互換性のため H.264（AVC）で書き出したMP4を使用してください。`,
+      `映像コーデック「${name}」のままでは保存できません。互換性のため H.264（AVC）の MP4 が必要です（アップロード画面の自動変換を使ってください）。`,
     );
   }
   const badAudio = info.audioCodecs.find((c) => !(ALLOWED_AUDIO_CODECS as readonly string[]).includes(c));
   if (badAudio) {
     throw new Mp4Error(
       "UNSUPPORTED_AUDIO_CODEC",
-      `音声コーデック「${badAudio}」には対応していません。AAC音声で書き出してください。`,
+      `音声コーデック「${badAudio}」のままでは保存できません。AAC 音声が必要です（アップロード画面の自動変換を使ってください）。`,
     );
   }
   if (!isResolutionAllowed(info.width, info.height)) {
     throw new Mp4Error(
       "RESOLUTION_TOO_HIGH",
-      `解像度 ${info.width}×${info.height} は上限（${MAX_VIDEO_LONG_SIDE}×${MAX_VIDEO_SHORT_SIDE}、720p）を超えています。` +
-        "このサイトでは自動変換を行わないため、720p以下に変換してからアップロードしてください。",
+      `解像度 ${info.width}×${info.height} は保存できる上限（${MAX_VIDEO_LONG_SIDE}×${MAX_VIDEO_SHORT_SIDE}、720p）を超えています。` +
+        "保存する動画は720p以下である必要があります（アップロード画面の自動変換を使ってください）。",
     );
   }
 }

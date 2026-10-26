@@ -5,6 +5,7 @@ import { RETENTION_MS } from "../../shared/constants";
 import worker from "../src/index";
 import { ORPHAN_GRACE_MS, STALE_UPLOAD_MS, runCleanup } from "../src/cleanup";
 import type { Env } from "../src/env";
+import { buildMp4 } from "../../shared/testing/mp4fixture";
 import { baseComment, call, freshIp, login, seedVideo } from "./helpers";
 
 async function addComment(videoId: string) {
@@ -140,5 +141,43 @@ describe("14日後の自動削除（Cron Trigger）", () => {
     expect(d.status).toBe(200);
     const body = (await d.json()) as { cleanupRuns: unknown[] };
     expect(body.cleanupRuns.length).toBeGreaterThan(0);
+  });
+
+  it("自動変換してアップロードした動画も、変換後のファイル・サムネイル・コメント・メタデータごと削除する", async () => {
+    const admin = await login("admin");
+    const bytes = buildMp4({ width: 1280, height: 720, mdatBytes: 4096 });
+    const start = await call("/api/admin/videos", {
+      method: "POST",
+      token: admin,
+      json: {
+        title: "変換済み動画",
+        category: "授業",
+        fileName: "movie_720p.mp4",
+        fileSize: bytes.length,
+        contentType: "video/mp4",
+        source: { width: 1920, height: 1080, codec: "hevc", transcoded: true },
+      },
+    });
+    expect(start.status).toBe(201);
+    const { videoId } = (await start.json()) as { videoId: string };
+    const part = await call(`/api/admin/videos/${videoId}/parts/1`, {
+      method: "PUT",
+      token: admin,
+      body: bytes,
+      headers: { "Content-Length": String(bytes.length) },
+    });
+    const { etag } = (await part.json()) as { etag: string };
+    expect((await call(`/api/admin/videos/${videoId}/complete`, { method: "POST", token: admin, json: { parts: [{ partNumber: 1, etag }] } })).status).toBe(200);
+    const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0x10]);
+    expect((await call(`/api/admin/videos/${videoId}/thumbnail`, { method: "PUT", token: admin, body: jpeg, headers: { "Content-Type": "image/jpeg" } })).status).toBe(200);
+    await addComment(videoId);
+    expect(await exists(videoId)).toEqual({ video: true, comments: 1, file: true, thumb: true });
+
+    await expire(videoId);
+    await runCleanup(env, Date.now());
+    expect(await exists(videoId)).toEqual({ video: false, comments: 0, file: false, thumb: false });
+    // R2 に元動画などの別ファイルも残っていない
+    const left = await env.BUCKET.list({ prefix: `videos/${videoId}/` });
+    expect(left.objects).toHaveLength(0);
   });
 });

@@ -171,6 +171,12 @@ export function AdminVideoPage({ id }: { id: string }) {
           <dd>
             {video.width ?? "?"}×{video.height ?? "?"} / {formatTime(video.durationSeconds)} / {video.videoCodec ?? "?"} / {formatBytes(video.fileSize)}
           </dd>
+          <dt>元の動画</dt>
+          <dd>
+            {video.source?.transcoded
+              ? `自動変換済み（元：${video.source.width ?? "?"}×${video.source.height ?? "?"}${video.source.codec ? ` / ${video.source.codec}` : ""}）。元の動画は保存していません。`
+              : "変換なし（アップロードされたファイルをそのまま保存）"}
+          </dd>
           {video.failureReason && (
             <>
               <dt>失敗の理由</dt>

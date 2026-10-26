@@ -177,3 +177,60 @@ describe("動画アップロード", () => {
     expect(r2.ok).toBe(false);
   });
 });
+
+describe("自動変換に関するサーバー側の保証", () => {
+  it("変換済みとして申告されても、実ファイルが720pを超えていれば保存しない（ブラウザ側だけの偽装を防ぐ）", async () => {
+    const admin = await login("admin");
+    const bytes = mp4({ width: 1920, height: 1080 });
+    const { complete, videoId } = await upload(admin, bytes, { source: { width: 1920, height: 1080, codec: "h264", transcoded: true } });
+    expect(complete!.status).toBe(422);
+    expect(await env.BUCKET.head(`videos/${videoId}/video.mp4`)).toBeNull();
+    const row = await env.DB.prepare("SELECT status FROM videos WHERE id = ?1").bind(videoId).first<{ status: string }>();
+    expect(row!.status).toBe("failed");
+    // 公開されない
+    const viewer = await login("viewer");
+    expect((await call(`/api/videos/${videoId}`, { token: viewer })).status).toBe(404);
+  });
+
+  it("変換後の動画と元動画の情報を区別して記録する", async () => {
+    const admin = await login("admin");
+    const { complete, videoId } = await upload(admin, mp4({ width: 1280, height: 720 }), {
+      source: { width: 1920, height: 1080, codec: "hevc", transcoded: true },
+    });
+    expect(complete!.status).toBe(200);
+    const v = (await (await call(`/api/admin/videos/${videoId}`, { token: admin })).json()) as {
+      video: { width: number; height: number; videoCodec: string; source: Record<string, unknown> };
+    };
+    // 保存されている（サーバーが検査した）動画
+    expect([v.video.width, v.video.height, v.video.videoCodec]).toEqual([1280, 720, "avc1"]);
+    // 元動画の参考情報
+    expect(v.video.source).toEqual({ width: 1920, height: 1080, codec: "hevc", transcoded: true });
+  });
+
+  it("元動画の情報に不正な値があれば拒否する", async () => {
+    const admin = await login("admin");
+    const bad = [{ width: -1 }, { width: 1.5 }, { codec: "<script>" }, { transcoded: "yes" }, "string"];
+    for (const source of bad) {
+      const r = await call("/api/admin/videos", { method: "POST", token: admin, json: meta(mp4({}), { source }) });
+      expect(r.status, JSON.stringify(source)).toBe(400);
+    }
+  });
+
+  it("同時に進行できるアップロード数を制限する", async () => {
+    const admin = await login("admin");
+    // 他のテストで残った進行中のアップロードを片付ける
+    await env.DB.prepare("DELETE FROM videos WHERE status = 'uploading'").run();
+    const started: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await call("/api/admin/videos", { method: "POST", token: admin, json: meta(mp4({})) });
+      expect(r.status).toBe(201);
+      started.push(((await r.json()) as { videoId: string }).videoId);
+    }
+    const over = await call("/api/admin/videos", { method: "POST", token: admin, json: meta(mp4({})) });
+    expect(over.status).toBe(429);
+    expect(((await over.json()) as { error: { code: string } }).error.code).toBe("TOO_MANY_UPLOADS");
+    // 1件中止すると再び開始できる
+    await call(`/api/admin/videos/${started[0]}`, { method: "DELETE", token: admin });
+    expect((await call("/api/admin/videos", { method: "POST", token: admin, json: meta(mp4({})) })).status).toBe(201);
+  });
+});

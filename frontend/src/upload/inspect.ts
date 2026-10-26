@@ -1,6 +1,7 @@
 // アップロード前のローカル検査（ブラウザ内で完結。サーバー側でも同じ検査を必ず行う）
 import { ALLOWED_VIDEO_MIME } from "../../../shared/constants";
 import { Mp4Error, assertSupportedMp4, parseMp4, type ByteReader, type Mp4Info } from "../../../shared/mp4";
+import { TRANSCODE_LIMITS, transcodeReasons } from "../../../shared/transcode";
 
 /** Blob を読み込む（古いブラウザ向けに FileReader にも対応） */
 function readBlob(blob: Blob): Promise<ArrayBuffer> {
@@ -26,6 +27,7 @@ export function fileReader(file: Blob): ByteReader {
 
 export type InspectResult = { ok: true; info: Mp4Info } | { ok: false; reasons: string[]; info?: Mp4Info };
 
+/** そのままアップロードできるか（変換後のファイルの最終確認にも使う） */
 export async function inspectVideoFile(file: File, maxBytes: number): Promise<InspectResult> {
   const reasons: string[] = [];
   if (!/\.mp4$/i.test(file.name)) reasons.push("拡張子が .mp4 のファイルを選択してください。");
@@ -43,6 +45,47 @@ export async function inspectVideoFile(file: File, maxBytes: number): Promise<In
   }
   if (reasons.length || !info) return { ok: false, reasons, info };
   return { ok: true, info };
+}
+
+export interface SourceAnalysis {
+  /** MP4 として読めた場合の情報 */
+  info: Mp4Info | null;
+  /** 変換が必要な理由（空ならそのままアップロードできる） */
+  transcodeReasons: string[];
+  /** 変換もアップロードもできない理由 */
+  blockers: string[];
+}
+
+/** 選んだ動画を調べ、そのままアップロードするか・ブラウザで変換するかを決める */
+export async function analyzeSourceFile(file: File, maxUploadBytes: number): Promise<SourceAnalysis> {
+  const blockers: string[] = [];
+  if (file.size === 0) blockers.push("ファイルが空です。");
+  if (file.type && !file.type.startsWith("video/") && file.type !== "application/octet-stream") {
+    blockers.push(`動画ファイルではありません（${file.type}）。`);
+  }
+  let info: Mp4Info | null = null;
+  let parseError: string | undefined;
+  try {
+    info = await parseMp4(fileReader(file));
+    if (info.videoCodec === "encv") blockers.push("暗号化（DRM）された動画は変換できません。");
+  } catch (err) {
+    parseError = err instanceof Mp4Error ? err.message : "動画ファイルを解析できませんでした。";
+  }
+  const reasons = transcodeReasons(info, parseError);
+  if (reasons.length === 0 && file.size > maxUploadBytes) {
+    reasons.push(
+      `ファイルサイズ（${(file.size / 1024 / 1024).toFixed(1)}MB）が上限（${Math.floor(maxUploadBytes / 1024 / 1024)}MB）を超えるため、変換して小さくします。`,
+    );
+  }
+  if (reasons.length > 0 && file.size > TRANSCODE_LIMITS.maxInputBytes) {
+    blockers.push(
+      `このブラウザで変換できるのは ${Math.floor(TRANSCODE_LIMITS.maxInputBytes / 1024 / 1024)}MB までです（選んだファイル：${(file.size / 1024 / 1024).toFixed(0)}MB）。動画を分割してください。`,
+    );
+  }
+  if (info && info.durationSeconds > TRANSCODE_LIMITS.maxDurationSeconds && reasons.length > 0) {
+    blockers.push(`このブラウザで変換できるのは ${TRANSCODE_LIMITS.maxDurationSeconds / 60} 分までの動画です。`);
+  }
+  return { info, transcodeReasons: reasons, blockers };
 }
 
 /** 動画の指定時刻のフレームからサムネイル画像（JPEG）を作る */

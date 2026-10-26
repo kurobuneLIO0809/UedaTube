@@ -1,8 +1,13 @@
-# （任意）Cloudflare Worker を GitHub Actions からデプロイします。手動実行のみ。
-# 使う場合は Settings → Secrets and variables → Actions → Secrets に
-#   CLOUDFLARE_API_TOKEN（Workers・D1・R2 を編集できる API トークン）
-#   CLOUDFLARE_ACCOUNT_ID
-# を登録してください。合言葉などの Workers Secrets は wrangler secret put で別途登録します。
+# Cloudflare Worker（School NICO の API）を GitHub Actions からデプロイします。手動実行のみ。
+#
+# 事前に GitHub の Settings → Secrets and variables → Actions で次を登録してください。
+#   Secrets   : CLOUDFLARE_API_TOKEN   （Workers・D1・R2 を編集できる Cloudflare API トークン）
+#               CLOUDFLARE_ACCOUNT_ID  （Cloudflare のアカウントID）
+#   Variables : CLOUDFLARE_D1_DATABASE_ID（D1「school-nico-db」の Database ID。秘密情報ではない）
+#
+# 合言葉・署名鍵（VIEWER_PASSPHRASE / ADMIN_PASSPHRASE / SESSION_SECRET）はこのワークフローでは扱いません。
+# 初回デプロイ後に Cloudflare 管理画面で Secret として登録します（README「9. Workers Secrets の設定」）。
+# wrangler deploy は登録済みの Secret を削除しないため、再デプロイしても消えません。
 name: Deploy Worker (manual)
 
 on:
@@ -11,9 +16,22 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-worker
+  cancel-in-progress: false
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: worker
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      # wrangler の利用状況の送信を止める
+      WRANGLER_SEND_METRICS: "false"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,19 +39,46 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: worker/package-lock.json
-      - run: npm ci
-        working-directory: worker
-      - run: npm test
-        working-directory: worker
-      - name: D1 マイグレーション
-        working-directory: worker
+
+      - name: 1. 必要な設定が登録されているか確認（値は表示しない）
+        run: |
+          missing=0
+          if [ -z "$CLOUDFLARE_API_TOKEN" ]; then echo "::error::Secrets に CLOUDFLARE_API_TOKEN がありません。"; missing=1; fi
+          if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then echo "::error::Secrets に CLOUDFLARE_ACCOUNT_ID がありません。"; missing=1; fi
+          exit $missing
+
+      - name: 2. 依存関係のインストール
+        run: npm ci
+
+      - name: 3. テスト（失敗したらデプロイしない）
+        run: npm test
+
+      - name: 4. D1 の Database ID を設定（作業コピーのみ変更）
         env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
+        run: node scripts/set-d1-database-id.mjs
+
+      - name: 5. R2 バケットが存在するか確認
+        run: |
+          bucket=$(node -e "const t=require('fs').readFileSync('wrangler.jsonc','utf8');const m=t.match(/\"bucket_name\"\s*:\s*\"([^\"]+)\"/);if(!m)process.exit(1);console.log(m[1])")
+          echo "R2 バケット: $bucket"
+          if ! npx wrangler r2 bucket info "$bucket" > /dev/null; then
+            echo "::error::R2 バケット「$bucket」が見つかりません。Cloudflare 管理画面の R2 で同じ名前のバケットを作成してください（公開アクセスは無効のまま）。"
+            exit 1
+          fi
+
+      - name: 6. D1 マイグレーション（テーブルの作成・更新）
         run: npx wrangler d1 migrations apply school-nico-db --remote
-      - name: デプロイ
-        working-directory: worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: 7. Worker のデプロイ（R2・D1 のバインディングと Cron Trigger を含む）
         run: npx wrangler deploy
+
+      - name: 8. 次の作業の案内
+        run: |
+          {
+            echo "### Worker をデプロイしました"
+            echo ""
+            echo "- まだの場合は Cloudflare 管理画面で VIEWER_PASSPHRASE / ADMIN_PASSPHRASE / SESSION_SECRET を **Secret** として登録してください（README 9章）。"
+            echo "- Worker の URL（https://school-nico-api.<サブドメイン>.workers.dev）を GitHub の Variables「VITE_API_BASE_URL」に登録し、Deploy to GitHub Pages を実行してください。"
+            echo "- 動作確認: Worker の URL の末尾に /api/health を付けて開き、{\"ok\":true} と表示されること。"
+          } >> "$GITHUB_STEP_SUMMARY"

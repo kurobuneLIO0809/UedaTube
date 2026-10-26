@@ -9,9 +9,19 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  # 同じブランチ・PR で新しい実行が始まったら、古い実行は止める
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    # 通常は数分で終わる。止まった場合でも長時間ランナーを占有しない
+    timeout-minutes: 20
+    env:
+      # 720p 変換テストで使う FFmpeg（固定バージョンの静的ビルド。apt は使わない）
+      FFMPEG_STATIC_VERSION: "5.3.0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,9 +31,34 @@ jobs:
           cache-dependency-path: |
             worker/package-lock.json
             frontend/package-lock.json
+
+      - name: FFmpeg のキャッシュ
+        uses: actions/cache@v4
+        with:
+          path: .ci-tools
+          key: ffmpeg-static-${{ runner.os }}-${{ runner.arch }}-${{ env.FFMPEG_STATIC_VERSION }}
+
+      - name: FFmpeg の準備（720p 変換を実際の FFmpeg で検証するテスト用）
+        timeout-minutes: 5
+        run: |
+          bin="$PWD/.ci-tools/node_modules/ffmpeg-static/ffmpeg"
+          if [ ! -x "$bin" ]; then
+            npm install --prefix .ci-tools --no-save --no-audit --no-fund "ffmpeg-static@${FFMPEG_STATIC_VERSION}"
+          fi
+          "$bin" -hide_banner -version | head -1
+          echo "FFMPEG_PATH=$bin" >> "$GITHUB_ENV"
+
       - name: 依存関係のインストール
+        timeout-minutes: 10
         run: npm run install:all
+
       - name: テスト（フロントエンド・共通ロジック・Worker API）
+        timeout-minutes: 10
+        env:
+          # FFmpeg が使えない場合は変換テストをスキップせず失敗させる
+          REQUIRE_FFMPEG: "1"
         run: npm test
+
       - name: 型チェックとビルド
+        timeout-minutes: 10
         run: npm run build

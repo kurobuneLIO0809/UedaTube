@@ -7,7 +7,9 @@
   "compatibility_date": "2026-10-01",
   "observability": { "enabled": true },
 
-  // D1：動画情報・コメント。database_id は `npx wrangler d1 create school-nico-db` の出力に置き換える
+  // D1：動画情報・コメント。
+  // database_id はここに直接書かず、GitHub Actions の Variables「CLOUDFLARE_D1_DATABASE_ID」の値を
+  // デプロイ時にワークフロー（.github/workflows/deploy-worker.yml）が書き込みます。
   "d1_databases": [
     {
       "binding": "DB",
@@ -24,8 +26,9 @@
   "triggers": { "crons": ["*/5 * * * *"] },
 
   "vars": {
-    // GitHub Pages のオリジン（https://<ユーザー名>.github.io）。複数ある場合はカンマ区切り
-    "ALLOWED_ORIGINS": "https://YOUR_GITHUB_USERNAME.github.io,http://localhost:5173",
+    // GitHub Pages のオリジン。ブラウザが送るオリジンは小文字なので小文字で書く。複数ある場合はカンマ区切り
+    // （ローカル開発では worker/.dev.vars の ALLOWED_ORIGINS で上書きします）
+    "ALLOWED_ORIGINS": "https://kurobunelio0809.github.io",
     // アップロードできる動画の最大サイズ（バイト）。初期値 500MB
     "MAX_UPLOAD_BYTES": "524288000",
     // 分割アップロード1回のサイズ（バイト）。5MiB以上・95MiB以下。初期値 10MiB
