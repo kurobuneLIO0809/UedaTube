@@ -196,7 +196,7 @@ npm run build    # 型チェック + 画面の本番ビルド + Worker のビル
 ```
 
 - `npm run test:api` … Worker のテスト。Cloudflare の実行環境（workerd）とローカルの D1・R2 を使って、実際の API に HTTP リクエストを送って確認します。
-- `npm run test:shared-and-web` … コメント描画エンジン、入力検証、MP4 解析、720p 変換、画面部品のテスト。720p 変換のテストはパソコンに `ffmpeg` コマンドがあるときだけ実行されます（GitHub Actions の CI では自動でインストールして実行します）。
+- `npm run test:shared-and-web` … コメント描画エンジン、入力検証、MP4 解析、720p 変換、画面部品のテスト。720p 変換のテストは `ffmpeg` コマンド（または環境変数 `FFMPEG_PATH` で指定した ffmpeg）があるときに実行されます。GitHub Actions の CI では固定バージョンの静的ビルド（npm の `ffmpeg-static`、キャッシュあり）を使い、`REQUIRE_FFMPEG=1` を指定しているため、ffmpeg が使えない場合はスキップせずに失敗します。
 
 主なテスト内容：
 

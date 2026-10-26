@@ -66,19 +66,27 @@ describe("変換が必要かどうかの判定", () => {
   });
 });
 
-const hasFfmpeg = spawnSync("ffmpeg", ["-hide_banner", "-encoders"], { encoding: "utf8" }).stdout?.includes("libx264") ?? false;
+// 使う ffmpeg：環境変数 FFMPEG_PATH（CI では固定バージョンの静的ビルド）、なければ PATH 上の ffmpeg
+const FFMPEG = process.env.FFMPEG_PATH || "ffmpeg";
+const encoders = spawnSync(FFMPEG, ["-hide_banner", "-encoders"], { encoding: "utf8" }).stdout ?? "";
+const missing = ["libx264", "libx265", "libvpx-vp9", "libopus", " aac "].filter((e) => !encoders.includes(e));
+const hasFfmpeg = missing.length === 0;
+// CI（REQUIRE_FFMPEG=1）では、ffmpeg が無い・必要なエンコーダーが無い場合にスキップせず失敗させる
+if (process.env.REQUIRE_FFMPEG === "1" && !hasFfmpeg) {
+  throw new Error(`実際の FFmpeg による変換テストに必要な ffmpeg（${FFMPEG}）が使えません。不足: ${missing.join(", ") || "ffmpeg 本体"}`);
+}
 const dir = mkdtempSync(join(tmpdir(), "snico-transcode-"));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 function makeInput(name: string, args: string[]): string {
   const out = join(dir, name);
-  execFileSync("ffmpeg", ["-hide_banner", "-loglevel", "error", "-y", ...args, out]);
+  execFileSync(FFMPEG, ["-hide_banner", "-loglevel", "error", "-y", ...args, out]);
   return out;
 }
 
 function transcode(input: string, name: string) {
   const out = join(dir, name);
-  const r = spawnSync("ffmpeg", ["-loglevel", "error", ...buildTranscodeArgs(input, out)], { encoding: "utf8" });
+  const r = spawnSync(FFMPEG, ["-loglevel", "error", ...buildTranscodeArgs(input, out)], { encoding: "utf8" });
   return { status: r.status, out, stderr: r.stderr };
 }
 
@@ -90,7 +98,7 @@ async function inspect(path: string) {
 
 /** 実際にデコードできるか（全フレームを読み、エラーが無いこと） */
 function decodesCleanly(path: string): boolean {
-  const r = spawnSync("ffmpeg", ["-v", "error", "-i", path, "-f", "null", "-"], { encoding: "utf8" });
+  const r = spawnSync(FFMPEG, ["-v", "error", "-i", path, "-f", "null", "-"], { encoding: "utf8" });
   return r.status === 0 && r.stderr.trim() === "";
 }
 
