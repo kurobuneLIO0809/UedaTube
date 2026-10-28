@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { RETENTION_MS } from "../../shared/constants";
-import { call, login, seedVideo } from "./helpers";
+import { call, chunkKeyOf, login, seedVideo } from "./helpers";
 
 interface VideoJson {
   id: string;
@@ -153,7 +153,7 @@ describe("動画配信（Range対応）", () => {
     await env.DB.prepare("UPDATE videos SET uploadedAt = ?2, expiresAt = ?3 WHERE id = ?1")
       .bind(v.id, Date.now() - RETENTION_MS - 1, Date.now() - 1)
       .run();
-    expect(await env.BUCKET.head(`videos/${v.id}/video.mp4`)).not.toBeNull();
+    expect(await env.MEDIA.get(chunkKeyOf(v.id, 0))).not.toBeNull();
     const res = await call(pathOf(body!.streamUrl), { headers: { Range: "bytes=0-99" } });
     expect(res.status).toBe(410);
     expect((await call(pathOf(body!.thumbnailUrl!))).status).toBe(410);

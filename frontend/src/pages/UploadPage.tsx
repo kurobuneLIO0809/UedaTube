@@ -62,8 +62,9 @@ export function UploadPage() {
 
   useEffect(() => {
     getDashboard()
-      .then((d) => setMaxBytes(d.limits.maxUploadBytes))
-      .catch(() => setMaxBytes(500 * 1024 * 1024));
+      // 1本の上限と、保存領域（KV）の残りの小さい方
+      .then((d) => setMaxBytes(d.limits.availableBytes))
+      .catch(() => setMaxBytes(200 * 1024 * 1024));
   }, []);
 
   useEffect(() => {
@@ -225,6 +226,7 @@ export function UploadPage() {
     setThumb(null);
   }
 
+  const storageFull = maxBytes !== null && maxBytes < 1024 * 1024;
   const info = analysis?.info;
   const target = info && info.width > 0 && info.height > 0 ? computeTargetSize(info.width, info.height) : null;
   const pct = progress && progress.total ? Math.floor((progress.loaded / progress.total) * 100) : 0;
@@ -238,7 +240,7 @@ export function UploadPage() {
       <h1 id="upload-title">動画のアップロード</h1>
       <p className="muted">
         保存される動画は MP4（H.264 + AAC）、1280×720（縦長は720×1280）以下です。条件に合わない動画は、アップロード前にこのブラウザで自動的に変換します。
-        {maxBytes !== null && ` 保存できる大きさは1本 ${formatBytes(maxBytes)} まで。`}
+        {maxBytes !== null && ` 今アップロードできる大きさは最大 ${formatBytes(maxBytes)}（無料の保存領域の残りによって変わります）。`}
       </p>
 
       <ol className="steps" aria-label="手順">
@@ -248,6 +250,12 @@ export function UploadPage() {
         <li className={step === "upload" ? "on" : ""}>4. アップロード</li>
       </ol>
 
+      {storageFull && (
+        <p className="notice" role="alert">
+          無料の保存領域（Workers KV）がいっぱいのため、今はアップロードできません。古い動画を削除するか、14日後の自動削除を待ってください。
+        </p>
+      )}
+
       {step === "edit" && (
         <div className="card form-card">
           <label className="field">
@@ -256,7 +264,7 @@ export function UploadPage() {
               type="file"
               accept="video/*,.mp4,.m4v,.mov,.webm,.mkv"
               onChange={(e) => void chooseFile(e.target.files?.[0] ?? null)}
-              disabled={maxBytes === null}
+              disabled={maxBytes === null || storageFull}
             />
           </label>
           {analyzing && <p role="status">動画を調べています…</p>}

@@ -9,7 +9,7 @@
 - 右から左へ流れるコメント、上・下・中央・座標指定の固定コメント、色・サイズ・フォント指定
 - 改行・空白をそのまま使える **文字職人モード（コメントアート）**
 
-公開先は GitHub Pages（画面）と Cloudflare の無料枠（Workers・D1・R2）で、初期費用0円を目標にしています。
+公開先は GitHub Pages（画面）と Cloudflare の無料プラン（Workers・D1・Workers KV）で、**初期費用0円・支払い方法の登録なし** で運用できます。無料プランは上限を超えても課金されず、エラーになるだけです（[17. 無料枠と料金発生条件](#17-無料枠と料金発生条件)）。
 
 > [!IMPORTANT]
 > **このサイトのアクセス制限は「共有合言葉による簡易アクセス制御」です。利用者個人の本人確認ではありません。**
@@ -28,7 +28,7 @@
 - [3. ローカル開発環境の起動](#3-ローカル開発環境の起動)
 - [4. テスト・ビルド方法](#4-テストビルド方法)
 - [5. Cloudflare アカウントの準備](#5-cloudflare-アカウントの準備)
-- [6. R2 バケットの作成](#6-r2-バケットの作成)
+- [6. Workers KV（動画の保存領域）の作成](#6-workers-kv動画の保存領域の作成)
 - [7. D1 データベースの作成](#7-d1-データベースの作成)
 - [8. Worker のデプロイ（GitHub Actions）](#8-worker-のデプロイgithub-actions)
 - [9. Workers Secrets の設定](#9-workers-secrets-の設定)
@@ -55,7 +55,7 @@
    │
    └──(HTTPS / Authorization: Bearer トークン)──► Cloudflare Workers（API・認証・動画配信・自動削除）
                                                       ├─ D1：動画情報・コメント・管理用データ
-                                                      ├─ R2：動画ファイル・サムネイル（非公開）
+                                                      ├─ Workers KV：動画（塊に分割）・サムネイル（非公開・合計1GBまで）
                                                       └─ Cron Trigger：5分ごとに期限切れデータを削除
 ```
 
@@ -74,8 +74,8 @@
 - 合言葉が正しいと、有効期限付きの **署名済みトークン**（HMAC-SHA256）を発行します。ブラウザは `sessionStorage` にトークンだけを保存し、**合言葉そのものは保存しません**。タブを閉じると消えます。
 - 閲覧用トークン（初期値8時間）と管理者用トークン（初期値2時間）は別物です。管理者用 API はすべてサーバー側で管理者トークンかを確認し、閲覧用トークンでは **403** で拒否します（画面のボタンを隠すだけの実装ではありません）。
 - 合言葉を続けて間違えると一時的に制限します（閲覧用：10分間に10回、管理者用：15分間に5回）。
-- 動画は R2 の **非公開オブジェクト** です。公開 URL は作りません。動画の URL は「その動画だけに使える、15分で切れる署名付き URL」です。期限が切れると画面が自動で取り直します。
-- 動画配信・一覧・詳細・コメントのすべての API で、毎回 D1 の `expiresAt` を確認します。**R2 にファイルが残っていても、期限を過ぎた動画は管理者でも再生できません**（Cron が止まっていても有効）。
+- 動画は Workers KV に保存した **非公開のデータ** です（公開アクセスの機能はありません）。公開 URL は作りません。動画の URL は「その動画だけに使える、15分で切れる署名付き URL」です。期限が切れると画面が自動で取り直します。
+- 動画配信・一覧・詳細・コメントのすべての API で、毎回 D1 の `expiresAt` を確認します。**KV にファイルが残っていても、期限を過ぎた動画は管理者でも再生できません**（Cron が止まっていても有効）。
 - API の応答は `Cache-Control: no-store`、動画は `private, no-store` で、キャッシュから期限切れ動画が見られないようにしています。
 - CORS は `ALLOWED_ORIGINS` に書いたサイトだけに許可します。CORS は認証の代わりではなく、認証は必ずトークンで行います。
 - コメントは React のテキスト表示と Canvas の `fillText` で描画するため、HTML や JavaScript は実行されません。色はサーバー側で `#RRGGBB` 形式のみ受け付けます。
@@ -96,7 +96,7 @@
 | 失敗したとき | 理由を表示し、何もアップロード・公開しません。「もう一度変換する」「入力に戻る」を選べます |
 | 上限 | 変換元 1GB まで・30分までの動画・処理時間2時間まで・同時に1件。サーバー側でも同時に進行できるアップロードを3件までに制限 |
 
-**サーバーが保証すること**：ブラウザの変換結果は信用せず、Worker が R2 に保存されたファイルそのものを解析し、720p 以下・H.264・AAC（または音声なし）の MP4 でなければ保存せず、公開もしません。ブラウザ側を改造して 1080p のファイルを送っても保存されません。
+**サーバーが保証すること**：ブラウザの変換結果は信用せず、Worker が KV に保存されたファイルそのものを解析し、720p 以下・H.264・AAC（または音声なし）の MP4 でなければ保存せず、公開もしません。ブラウザ側を改造して 1080p のファイルを送っても保存されません。
 
 **サーバー側で変換しない理由**（2026年10月時点で調べた結果。最新情報は公式ページで確認してください）：
 
@@ -121,7 +121,7 @@
 | アカウント | 用途 | 費用 |
 | --- | --- | --- |
 | [GitHub](https://github.com/) | ソースコードの保管、GitHub Actions によるデプロイ、GitHub Pages での画面の公開 | 無料（公開リポジトリ） |
-| [Cloudflare](https://dash.cloudflare.com/sign-up) | Workers（API）、D1（データベース）、R2（動画保存） | 無料枠あり（R2 の有効化には支払い方法の登録が求められる場合があります） |
+| [Cloudflare](https://dash.cloudflare.com/sign-up) | Workers（API）、D1（データベース）、Workers KV（動画保存） | 無料（支払い方法の登録は不要） |
 
 > GitHub Pages を **非公開リポジトリ** で使うには GitHub の有料プランが必要です。無料プランでは **公開リポジトリ** を使います。ソースコードは公開されますが、合言葉や秘密鍵はリポジトリに含まれないため問題ありません。
 
@@ -146,7 +146,7 @@
 
 ## 3. ローカル開発環境の起動
 
-自分のパソコンだけで動作を試せます（Cloudflare アカウントは不要です。D1 と R2 はパソコン内に模擬環境が作られます）。
+自分のパソコンだけで動作を試せます（Cloudflare アカウントは不要です。D1 と KV はパソコン内に模擬環境が作られます）。
 
 1. ローカル用の秘密情報ファイルを作ります。
 
@@ -195,7 +195,7 @@ npm test         # すべてのテスト（画面・共通処理・Worker API）
 npm run build    # 型チェック + 画面の本番ビルド + Worker のビルド確認（--dry-run）
 ```
 
-- `npm run test:api` … Worker のテスト。Cloudflare の実行環境（workerd）とローカルの D1・R2 を使って、実際の API に HTTP リクエストを送って確認します。
+- `npm run test:api` … Worker のテスト。Cloudflare の実行環境（workerd）とローカルの D1・KV を使って、実際の API に HTTP リクエストを送って確認します。
 - `npm run test:shared-and-web` … コメント描画エンジン、入力検証、MP4 解析、720p 変換、画面部品のテスト。720p 変換のテストは `ffmpeg` コマンド（または環境変数 `FFMPEG_PATH` で指定した ffmpeg）があるときに実行されます。GitHub Actions の CI では固定バージョンの静的ビルド（npm の `ffmpeg-static`、キャッシュあり）を使い、`REQUIRE_FFMPEG=1` を指定しているため、ffmpeg が使えない場合はスキップせずに失敗します。
 
 主なテスト内容：
@@ -218,13 +218,30 @@ npm run build    # 型チェック + 画面の本番ビルド + Worker のビル
    - Worker の URL は `https://school-nico-api.<このサブドメイン>.workers.dev` になります（`school-nico-api` は `worker/wrangler.jsonc` の `name`）。
 3. **アカウントID** を控えます。「Workers & Pages」の画面右側、またはダッシュボードのアカウントのホーム画面に「Account ID」として表示されています。
 
-## 6. R2 バケットの作成
+## 6. Workers KV（動画の保存領域）の作成
 
-1. 左メニューの「**R2 オブジェクトストレージ**」を開き、案内に従って R2 を有効にします。無料枠の範囲でも **支払い方法（クレジットカードなど）の登録を求められる** ことがあります（[17. 無料枠と料金発生条件](#17-無料枠と料金発生条件)）。
-2. 「**バケットを作成**」を押し、名前に **`school-nico-videos`** と入力して作成します（`worker/wrangler.jsonc` の `bucket_name` と同じ名前にする必要があります）。場所（ロケーション）は自動のままで構いません。
-3. **バケットを公開しないでください。**「パブリックアクセス」「r2.dev サブドメイン」「カスタムドメイン」は **無効のまま** にします。動画は必ず Worker を通して配信します。
+動画とサムネイルは **Workers KV** に保存します。R2 は有効化に支払い方法の登録が必要なため使いません。
 
-（参考）コマンドで行う場合：`cd worker && npx wrangler r2 bucket create school-nico-videos`
+1. Cloudflare ダッシュボードの左メニュー「**ストレージとデータベース**」→「**Workers KV**」（表示名は「KV」の場合もあります）を開きます。
+2. 「**作成（Create）**」を押し、名前に **`school-nico-media`** と入力して作成します（名前は自由ですが、この README ではこの名前で説明します）。
+3. 一覧に表示される **ID（Namespace ID。0〜9 と a〜f の32文字）** を控えます。秘密情報ではありません。
+
+**無料プランの KV の上限と、このサイトの動き**
+
+| 項目 | 無料プランの上限 | このサイトの設定（`wrangler.jsonc`） |
+| --- | --- | --- |
+| 保存容量 | 合計 1GB | `KV_STORAGE_LIMIT_BYTES`＝900MiB で受け付けを止める |
+| 書き込み | 1日 1,000回 | `KV_DAILY_WRITE_LIMIT`＝900回で止める（動画は 8MiB ごとに1回） |
+| 削除 | 1日 1,000回 | `KV_DAILY_DELETE_LIMIT`＝900回（足りない日は翌日以降に削除。視聴はできない） |
+| 一覧取得 | 1日 1,000回 | `KV_DAILY_LIST_LIMIT`＝900回（孤立ファイルの検査で1時間に1回だけ使う） |
+| 読み取り | 1日 10万回 | 再生では 8MiB ごとに1回 |
+| 1つの値 | 25MiB まで | 動画を 8MiB（`UPLOAD_PART_BYTES`）ごとの塊に分けて保存 |
+
+- 上限を超えても料金は発生せず、その日の操作がエラーになるだけです。このサイトは手前で止めて、分かりやすいメッセージを表示します。回数は毎日 UTC 0時（日本時間 9時）に戻ります。
+- 900MiB は 720p の動画で **およそ45分〜1時間半ぶん** です（動きの多い動画ほど大きくなります）。動画は14日で自動削除されるため、「直近14日間に公開する動画の合計」がこの範囲に収まるようにしてください。管理ダッシュボードで残りを確認できます。
+- KV は書き込みが世界中に反映されるまで最大60秒ほどかかることがあります。公開直後に再生できない場合は、少し待つと再生できます。
+
+（参考）コマンドで行う場合：`cd worker && npx wrangler kv namespace create school-nico-media`
 
 ## 7. D1 データベースの作成
 
@@ -243,7 +260,7 @@ npm run build    # 型チェック + 画面の本番ビルド + Worker のビル
 2. テンプレート「**Edit Cloudflare Workers（Cloudflare Workers を編集する）**」の「Use template」を押します。
 3. 「Permissions（権限）」に次が含まれていることを確認し、足りないものは「+ Add more」で追加します。
    - Account ／ **Workers Scripts** ／ Edit
-   - Account ／ **Workers R2 Storage** ／ Edit
+   - Account ／ **Workers KV Storage** ／ Edit
    - Account ／ **D1** ／ Edit（テンプレートに無い場合は追加）
 4. 「Account Resources」で自分のアカウントを選び、「Continue to summary」→「Create Token」。
 5. 表示されたトークンを **すぐに次の手順で GitHub に貼り付けます。トークンは一度しか表示されません。** チャット・メール・ファイル・GitHub のコードには絶対に貼らないでください。
@@ -257,8 +274,9 @@ GitHub のリポジトリ画面 →「**Settings**」→「**Secrets and variabl
 | **Secrets** →「New repository secret」 | `CLOUDFLARE_API_TOKEN` | 8-1 のトークン | 秘密情報 |
 | **Secrets** →「New repository secret」 | `CLOUDFLARE_ACCOUNT_ID` | 5章のアカウントID | 秘密情報として扱う |
 | **Variables** →「New repository variable」 | `CLOUDFLARE_D1_DATABASE_ID` | 7章の Database ID | 公開してよい値 |
+| **Variables** →「New repository variable」 | `CLOUDFLARE_KV_NAMESPACE_ID` | 6章の KV の ID | 公開してよい値 |
 
-`CLOUDFLARE_D1_DATABASE_ID` は、デプロイ時にワークフローが `worker/wrangler.jsonc` の `database_id` に書き込みます（リポジトリのファイルは変更しません）。
+`CLOUDFLARE_D1_DATABASE_ID` と `CLOUDFLARE_KV_NAMESPACE_ID` は、デプロイ時にワークフローが `worker/wrangler.jsonc` に書き込みます（リポジトリのファイルは変更しません）。
 
 ### 8-3. ワークフローを実行する
 
@@ -266,10 +284,10 @@ GitHub のリポジトリ画面 →「**Settings**」→「**Secrets and variabl
 2. ワークフローは次の順に実行されます。途中で失敗した場合、それ以降は実行されません。
    1. 必要な Secrets が登録されているか確認（値は表示しません）
    2. 依存関係のインストールとテスト
-   3. D1 の Database ID を設定（形式が正しいか検査）
-   4. R2 バケット `school-nico-videos` が存在するか確認
+   3. D1 の Database ID と KV の ID を設定（形式が正しいか検査）
+   4. KV 名前空間が存在するか確認
    5. D1 マイグレーション（テーブルの作成・更新）
-   6. Worker のデプロイ（R2・D1 のバインディング、5分ごとの Cron Trigger を含む）
+   6. Worker のデプロイ（KV・D1 のバインディング、5分ごとの Cron Trigger を含む）
 3. 緑のチェックになったら完了です。Cloudflare の「Workers & Pages」に `school-nico-api` が表示されます。
 4. ブラウザで `https://school-nico-api.<サブドメイン>.workers.dev/api/health` を開き、`{"ok":true}` と表示されることを確認します。
 
@@ -348,7 +366,7 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
 5. 1080p の動画（スマートフォンで撮った動画など）を選ぶ →「アップロード前に、このブラウザで自動変換します」と表示 →「変換を開始」→ 進み具合が表示され、確認画面のプレビューで再生でき、解像度が 1280×720（縦長は 720×1280）以下になっていること。
 6. タイトル等を入力 → 削除予定日時を確認 →「アップロードを開始」→ 完了すること。管理画面の動画詳細に「自動変換済み（元：1920×1080 …）」と表示されること。
 7. 「動画を確認する」→ 再生・シーク・音量・全画面・再生速度・コメント表示切替が動くこと。
-8. コメントを投稿 → 右から左へ流れ、別のブラウザ（またはスマートフォン）で同じ動画の同じ位置を再生したときにも表示されること（最大10秒程度で他の人の画面に反映されます）。
+8. コメントを投稿 → 右から左へ流れ、別のブラウザ（またはスマートフォン）で同じ動画の同じ位置を再生したときにも表示されること（最大15秒程度で他の人の画面に反映されます）。
 9. 「文字職人モード」→「見本を入れる」→ 動画の上にプレビューが出ること → 投稿できること。
 10. 管理画面でコメントの非表示・削除、動画のコメント受付停止ができること。
 
@@ -370,10 +388,11 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
 
 1. アップロード完了時刻を `uploadedAt`、その14日後（UTC）を `expiresAt` として D1 に保存します（データベースの CHECK 制約で「ちょうど14日後」以外は保存できません）。
 2. 期限を過ぎた瞬間から、一覧・詳細・コメント・動画配信・サムネイルの API がすべて **410（期限切れ）** を返します。Cron が動く前でも視聴できません。
-3. 5分ごとの Cron Trigger が、期限切れ動画の R2 ファイル（動画・サムネイル）、D1 のコメント、D1 の動画情報を削除します。1回に最大10本ずつ処理します。
+3. 5分ごとの Cron Trigger が、期限切れ動画の KV のデータ（動画の塊・サムネイル）、D1 のコメント、D1 の動画情報を削除します。1回に最大10本ずつ処理します。KV のその日の削除回数が足りない場合は、視聴不可のまま翌日以降に削除します。
+   さらに KV に保存するすべてのデータに有効期限（保存から16日）を付けているため、定期削除が止まっていても KV から自動で消えます。
 4. 削除の途中で失敗した場合は「削除処理中」の状態で残り（視聴不可のまま）、次回の Cron で再試行します。既に消えたファイルを消そうとしても失敗しません。
 5. 期限切れの動画は「公開する」操作でも再公開できません（410 で拒否）。期限の延長機能もありません。
-6. 完了しなかったアップロード・検査に失敗したアップロードは24時間後に、D1 に対応する動画が無い R2 上の孤立ファイルは6時間後に自動で削除します。
+6. 完了しなかったアップロード・検査に失敗したアップロードは24時間後に、D1 に対応する動画が無い KV 上の孤立ファイルは6時間後以降に自動で削除します（検査は1時間に1回）。
 
 確認手順（本番で試す場合は、必ずテスト用の動画で行ってください）。SQL は Cloudflare ダッシュボードの「D1 SQL データベース」→ `school-nico-db` →「コンソール（Console）」に貼り付けて実行できます。
 
@@ -397,28 +416,30 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
    SELECT (SELECT COUNT(*) FROM videos WHERE id='ここに動画ID') AS videos, (SELECT COUNT(*) FROM comments WHERE videoId='ここに動画ID') AS comments;
    ```
 
-6. Cloudflare ダッシュボードの「R2」→ `school-nico-videos` → `videos/` フォルダーに、その動画 ID のフォルダー（変換後の動画 `video.mp4` とサムネイル）が無いことを確認します。自動変換した動画も同じ場所に保存されているため、同じように削除されます（元の動画はもともと保存されていません）。
+6. Cloudflare ダッシュボードの「Workers KV」→ `school-nico-media` → 「KV ペア」で、`v/ここに動画ID/` で始まるキー（動画の塊 `c/0`, `c/1`… とサムネイル `t`）が無いことを確認します。自動変換した動画も同じ場所に保存されているため、同じように削除されます（元の動画はもともと保存されていません）。
 
 ## 17. 無料枠と料金発生条件
 
 > 以下は執筆時点で一般に公開されている値です。**料金・無料枠は変更されることがあるため、必ず公式ページで最新の値を確認してください。**
-> [Workers の制限](https://developers.cloudflare.com/workers/platform/limits/) / [Workers の料金](https://developers.cloudflare.com/workers/platform/pricing/) / [D1 の料金](https://developers.cloudflare.com/d1/platform/pricing/) / [R2 の料金](https://developers.cloudflare.com/r2/pricing/) / [GitHub Pages の制限](https://docs.github.com/ja/pages/getting-started-with-github-pages/github-pages-limits)
+> [Workers の制限](https://developers.cloudflare.com/workers/platform/limits/) / [Workers の料金](https://developers.cloudflare.com/workers/platform/pricing/) / [D1 の料金](https://developers.cloudflare.com/d1/platform/pricing/) / [Workers KV の料金・上限](https://developers.cloudflare.com/kv/platform/pricing/) / [GitHub Pages の制限](https://docs.github.com/ja/pages/getting-started-with-github-pages/github-pages-limits)
 
 | サービス | 無料枠の目安 | このサイトでの使われ方 |
 | --- | --- | --- |
-| Workers（Free） | 1日10万リクエスト、1回あたりの CPU 時間に上限、リクエスト本文は最大100MB | API 呼び出し、動画の Range 配信（シークごとに1リクエスト）、10秒ごとのコメント取得。**無料プランは上限を超えると課金ではなくエラーになります** |
+| Workers（Free） | 1日10万リクエスト、1回あたりの CPU 時間に上限、リクエスト本文は最大100MB | API 呼び出し、動画の配信（8MiB ごとに1リクエスト）、15秒ごとのコメント取得。**無料プランは上限を超えると課金ではなくエラーになります** |
 | D1（Free） | 1日あたり 読み取り500万行・書き込み10万行、合計5GB | コメントの保存・取得、レート制限 |
-| R2 | 毎月 10GB-月の保存、Class A 操作100万回、Class B 操作1000万回、**転送量（エグレス）無料** | 動画の保存（アップロード1パートごとに Class A、再生の Range ごとに Class B） |
+| Workers KV（Free） | 合計1GB、1日あたり 読み取り10万回・書き込み1,000回・削除1,000回・一覧取得1,000回、1つの値は25MiBまで | 動画とサムネイルの保存（[6章](#6-workers-kv動画の保存領域の作成)）。**上限を超えても課金されずエラーになるだけ** |
 | GitHub Pages | 公開サイト1GB程度、月100GB程度の転送の目安 | 画面ファイル（約0.3MB）と動画変換用の FFmpeg（約32MB、管理者が変換するときだけ読み込み） |
 | GitHub Actions | 公開リポジトリは標準のランナーを無料で利用可能 | テスト・Worker のデプロイ・Pages の公開（動画の変換には使いません） |
 | 動画の自動変換 | 管理者のブラウザで実行するため **無料** | 変換中は管理者のパソコンの CPU・メモリを使います |
 
 料金が発生する・止まる主な条件：
 
-- **R2 の保存容量が 10GB を超えると課金対象**（超過分 1GB あたり月額数セント程度）。動画は14日で消えるため、「14日間にアップロードする動画の合計」を 10GB 未満に保てば無料枠内に収まります。管理ダッシュボードの「動画の保存容量」で確認できます。1本の上限は `MAX_UPLOAD_BYTES`（初期値500MB）で調整できます。
+- **支払い方法を登録していなければ、どのサービスも自動で有料にはなりません。** 上限を超えた分はエラーになり、翌日（UTC 0時）に回復します。
+- 動画の保存領域は合計900MiB（KV の無料枠1GB の手前）までです。1本の上限は `MAX_UPLOAD_BYTES`（初期値200MiB）です。管理ダッシュボードの「動画の保存領域」で残りを確認できます。
+- R2 や Workers の有料プランは使っていません（R2 は有効化に支払い方法の登録が必要なため、KV に変更しました）。
 - Workers を有料プラン（Workers Paid）に変更した場合は月額料金がかかります。無料プランのままなら、1日10万リクエストを超えると当日中はエラーになり、翌日（UTC 0時）に回復します。
-- 全校で同時に視聴するなど利用が多い場合、コメントのポーリング（1人10秒ごと）でリクエストが増えます。`frontend/src/config.ts` の `commentPollMs` を長くすると減らせます。
-- Cloudflare ダッシュボードの「請求」で利用状況と、R2 の使用量の通知を設定しておくことをおすすめします。
+- 全校で同時に視聴するなど利用が多い場合、コメントのポーリング（1人15秒ごと、1時間で240回）でリクエストが増えます。`frontend/src/config.ts` の `commentPollMs` を長くすると減らせます。
+- Cloudflare ダッシュボードの Workers・KV の画面で、日々の利用状況を確認できます。
 - サーバー側で動画を変換する Cloudflare Stream・Containers は有料です。このサイトは使っていません（[動画の自動変換](#動画の自動変換720p)）。
 
 ## 18. バックアップと障害発生時の対応
@@ -430,7 +451,7 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
   npx wrangler d1 export school-nico-db --remote --output backup.sql
   ```
   （`backup.sql` にはコメント本文が含まれるため、取り扱いに注意し、GitHub にコミットしないでください。）
-- R2：動画は14日で消える前提のため、自動バックアップはしていません。元の動画ファイルは各先生の手元に保管してください。
+- KV：動画は14日で消える前提のため、自動バックアップはしていません。元の動画ファイルは各先生の手元に保管してください。
 
 **よくある障害と対応**
 
@@ -440,8 +461,11 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
 | 「サーバーの設定が完了していません」 | Cloudflare の `school-nico-api` →「設定」→「変数とシークレット」に3つの Secret があるか確認（短すぎる・閲覧用と管理者用が同じ場合も表示） |
 | 画面は出るが API がすべて失敗（ブラウザのコンソールに CORS エラー） | `wrangler.jsonc` の `ALLOWED_ORIGINS` が **小文字の** `https://ユーザー名.github.io` になっているか確認し、8章のワークフローを再実行 |
 | Deploy Worker が「CLOUDFLARE_D1_DATABASE_ID が未設定」で失敗 | 8-2 の Variables を確認（Secrets ではなく Variables タブ） |
-| Deploy Worker が「R2 バケットが見つかりません」で失敗 | 6章のバケット名 `school-nico-videos` と、API トークンの R2 権限を確認 |
-| Deploy Worker が認証エラー（Authentication error など）で失敗 | API トークンの権限（Workers Scripts・Workers R2 Storage・D1 の Edit）とアカウントID を確認。トークンを作り直して Secrets を更新 |
+| Deploy Worker が「CLOUDFLARE_KV_NAMESPACE_ID が未設定」「KV 名前空間が見つかりません」で失敗 | 6章の KV の ID を Variables に登録したか、API トークンの KV 権限を確認 |
+| Deploy Worker が認証エラー（Authentication error など）で失敗 | API トークンの権限（Workers Scripts・Workers KV Storage・D1 の Edit）とアカウントID を確認。トークンを作り直して Secrets を更新 |
+| 「動画の保存領域が足りません」 | 管理ダッシュボードで使用量を確認し、不要な動画を削除するか、14日後の自動削除を待つ |
+| 「今日の動画保存領域（Workers KV）の書き込み回数の上限に近い」 | 日本時間 9時以降に再度アップロード |
+| 公開直後に「動画の準備中です」 | KV の反映待ちです。1分ほど待ってから再生 |
 | 動画の変換が終わらない・失敗する | 長い動画・大きい動画はブラウザのメモリが足りないことがあります。動画を短く分けるか、パソコンで 720p に書き出してからアップロードしてください |
 | GitHub Pages の画面が真っ白 | Actions のログを確認。Variables の `VITE_API_BASE_URL` 未設定だとビルドが止まります |
 | 動画が再生できない | 管理画面の動画詳細で「再生可能か検査」を実行。H.264 以外のコーデックや壊れたファイルの可能性 |
@@ -471,7 +495,7 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
 | `POST /api/videos/:id/comments` | 閲覧 | コメント投稿 |
 | `GET /api/admin/dashboard` | 管理者 | 統計・期限間近・失敗・自動削除の記録 |
 | `GET /api/admin/videos` | 管理者 | 全動画（非公開・失敗含む） |
-| `POST /api/admin/videos` | 管理者 | アップロード開始（R2 マルチパート作成） |
+| `POST /api/admin/videos` | 管理者 | アップロード開始（KV の容量と今日の書き込み回数を確認して予約） |
 | `PUT /api/admin/videos/:id/parts/:n` | 管理者 | 分割アップロードの1パート |
 | `POST /api/admin/videos/:id/complete` | 管理者 | 結合・MP4 検査・公開 |
 | `PUT /api/admin/videos/:id/thumbnail` | 管理者 | サムネイル登録（JPEG/PNG/WebP、2MB まで） |
@@ -481,15 +505,17 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
 | `PATCH /api/admin/comments/:id` / `DELETE` | 管理者 | コメントの非表示切替・削除 |
 | `POST /api/admin/cleanup` | 管理者 | 自動削除の手動実行 |
 
-**アップロードの方式**：Workers 無料プランのリクエスト本文の上限（100MB）を超えられるよう、動画を `UPLOAD_PART_BYTES`（初期値10MiB）ごとに分割して送り、R2 のマルチパートアップロードで結合します。結合後、Worker が R2 から範囲読み込みして MP4 の構造（形式・コーデック・解像度・長さ）を **サーバー側でも検査** し、条件を満たさなければファイルを削除して失敗として記録します（公開されません）。720p への変換はアップロード前にブラウザで行います（[動画の自動変換](#動画の自動変換720p)）。同時に進行できるアップロードは3件までです。
+**アップロードと保存の方式**：動画を `UPLOAD_PART_BYTES`（初期値8MiB）ごとの塊に分けて送り、塊ごとに Workers KV に保存します（KV の1つの値は25MiBまで）。どの塊を受け取ったかは D1 に記録します。再生時は、要求された位置を含む塊1つ分を 206 で返し、ブラウザが続きを順に要求します。すべての塊がそろったら、Worker が KV から読み込んで MP4 の構造（形式・コーデック・解像度・長さ）を **サーバー側でも検査** し、条件を満たさなければファイルを削除して失敗として記録します（公開されません）。720p への変換はアップロード前にブラウザで行います（[動画の自動変換](#動画の自動変換720p)）。同時に進行できるアップロードは3件までです。
 
 ## データベース
 
-テーブル定義は `worker/migrations/` にあります（`0001_init.sql`、`0002_transcode_source.sql`）。
+テーブル定義は `worker/migrations/` にあります（`0001_init.sql`、`0002_transcode_source.sql`、`0003_kv_storage.sql`）。
 
-- `videos`：id, title, description, category, r2Key, thumbnailKey, durationSeconds, width, height, createdAt, uploadedAt, expiresAt, status（uploading / published / hidden / failed / deleting）, commentsEnabled ほか
+- `videos`：id, title, description, category, storageKey（KV のキーの接頭辞）, thumbnailKey, durationSeconds, width, height, createdAt, uploadedAt, expiresAt, status（uploading / published / hidden / failed / deleting）, commentsEnabled ほか
 - `comments`：id, videoId（`ON DELETE CASCADE`）, nickname, text, playbackTimeSeconds, mode, color, fontSize, fontFamily, xPercent, yPercent, durationSeconds, opacity, isCommentArt, artLines（行ごとの文字列・色・サイズの JSON）, textAlign, lineHeight, hidden, createdAt ほか
 - `videos` の `sourceWidth`, `sourceHeight`, `sourceCodec`, `transcoded`：自動変換した場合の **元動画の参考情報**（保存される動画の解像度・コーデックは `width`・`height`・`videoCodec` で、サーバーが実ファイルを検査した値）
+- `video_chunks`：KV に保存した動画の塊（番号と大きさ）。容量の集計と削除に使う
+- `kv_daily_ops`：KV の1日あたりの書き込み・削除・一覧取得の回数（無料プランの上限の手前で止めるため）
 - `rate_limits`、`meta`、`cleanup_runs`：連続試行の制限、定期処理の状態、自動削除の記録
 
 テーブルを変更するときは `worker/migrations/0003_xxx.sql` のように新しいファイルを追加し、8章の「Deploy Worker」ワークフローを実行します（マイグレーションが自動で適用されます）。
@@ -500,17 +526,19 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
 | --- | --- | --- | --- |
 | Workers Secrets（Cloudflare 管理画面） | `VIEWER_PASSPHRASE` / `ADMIN_PASSPHRASE` / `SESSION_SECRET` | なし | 合言葉と署名鍵 |
 | GitHub Secrets | `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` | なし | Worker のデプロイ用 |
-| GitHub Variables | `CLOUDFLARE_D1_DATABASE_ID` | なし | D1 の Database ID（デプロイ時に設定） |
+| GitHub Variables | `CLOUDFLARE_D1_DATABASE_ID` / `CLOUDFLARE_KV_NAMESPACE_ID` | なし | D1 と KV の ID（デプロイ時に設定） |
 | `wrangler.jsonc` | `ALLOWED_ORIGINS` | `https://kurobunelio0809.github.io` | CORS を許可するサイト（小文字） |
-| 〃 | `MAX_UPLOAD_BYTES` | 524288000（500MB） | 動画1本の最大サイズ |
-| 〃 | `UPLOAD_PART_BYTES` | 10485760（10MiB） | 分割アップロードの1回のサイズ（5MiB〜95MiB） |
+| 〃 | `MAX_UPLOAD_BYTES` | 209715200（200MiB） | 動画1本の最大サイズ |
+| 〃 | `UPLOAD_PART_BYTES` | 8388608（8MiB） | 分割アップロード1回＝KV に保存する塊1つのサイズ（1MiB〜24MiB） |
+| 〃 | `KV_STORAGE_LIMIT_BYTES` | 943718400（900MiB） | KV に保存してよい合計 |
+| 〃 | `KV_DAILY_WRITE_LIMIT` / `KV_DAILY_DELETE_LIMIT` / `KV_DAILY_LIST_LIMIT` | 900 / 900 / 900 | KV の1日あたりの操作回数の上限 |
 | 〃 | `VIEWER_TOKEN_TTL_SECONDS` / `ADMIN_TOKEN_TTL_SECONDS` | 28800 / 7200 | トークンの有効期間（秒） |
 | 〃 | `MEDIA_TOKEN_TTL_SECONDS` | 900 | 動画・サムネイルの署名 URL の有効期間（秒） |
 | GitHub Variables | `VITE_API_BASE_URL` / `VITE_SITE_NAME` / `VITE_CATEGORIES` / `VITE_BASE_PATH` | — | 画面の設定 |
 | `shared/constants.ts` | 文字数・行数・サイズの上限、色のプリセット | — | 画面と API の両方に反映 |
 | `shared/transcode.ts` | `TRANSCODE_LIMITS` / `TRANSCODE_OUTPUT` | 1GB・30分・2時間 / CRF 23・veryfast・AAC 128kbps | ブラウザ内変換の上限と画質 |
 | `worker/src/routes/admin.ts` | `MAX_CONCURRENT_UPLOADS` | 3 | 同時に進行できるアップロード数 |
-| `frontend/src/config.ts` | `commentPollMs` など | 10秒 | コメント取得間隔など |
+| `frontend/src/config.ts` | `commentPollMs` など | 15秒 | コメント取得間隔など |
 
 保存期間（14日）と最大解像度（720p）は仕様として `shared/constants.ts` に固定しています。
 
@@ -518,7 +546,9 @@ CORS を許可するサイト（`ALLOWED_ORIGINS`）は `worker/wrangler.jsonc` 
 
 - 動画の変換はサーバーではなく管理者のブラウザで行います（無料で運用するため）。変換中はタブを開いたままにする必要があり、長い動画は時間がかかります。変換元は1GB・30分までです。
 - スマートフォン（特に iPhone）のブラウザはメモリが少ないため、変換はパソコンのブラウザ（Chrome・Edge・Firefox など）で行うことをおすすめします。
-- コメントは10秒ごとのポーリングで共有します（WebSocket などのリアルタイム通信は使っていません）。
+- 動画の保存領域は合計900MiB（Workers KV 無料プランの1GB の手前）までです。720p で45分〜1時間半ぶん程度のため、長い動画をたくさん公開する用途には向きません。
+- Cloudflare の規約では、動画などの大きなファイルの配信に有料サービスの利用を求める項目があります（Developer Platform・Stream・Images など）。Workers 無料プランと KV での配信がこれに当たるかは明記されていないため、校内の少ない利用量にとどめ、心配な場合は Cloudflare に確認してください。
+- コメントは15秒ごとのポーリングで共有します（WebSocket などのリアルタイム通信は使っていません）。
 - 1本の動画で一度に読み込むコメントは最新2000件まで、保存できるのは20000件までです。
 - iPhone の Safari は要素の全画面表示に対応していないため、全画面時は動画だけの表示になり、コメントは表示されません（通常表示ではコメントが表示されます）。
 - コメントアートの見た目は端末にあるフォントに左右されます。等幅フォントを選ぶと崩れにくくなります。

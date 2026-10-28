@@ -83,5 +83,13 @@ export interface Dashboard {
     createdAt: string;
   }[];
   cleanupRuns: { id: number; ranAt: string; deletedVideos: number; failedVideos: number; orphanObjects: number; errors: string[] }[];
-  limits: { maxUploadBytes: number; partSize: number };
+  limits: { maxUploadBytes: number; partSize: number; availableBytes: number };
+  /** 動画の保存領域（Workers KV 無料プラン）の使用状況 */
+  kv: {
+    usedBytes: number;
+    limitBytes: number;
+    opsToday: { write: number; delete: number; list: number };
+    opsLimits: { write: number; delete: number; list: number };
+    resetsAt: string;
+  };
 }

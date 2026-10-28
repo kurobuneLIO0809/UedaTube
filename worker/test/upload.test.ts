@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { RETENTION_MS } from "../../shared/constants";
 import { buildMp4, type FixtureOptions } from "../../shared/testing/mp4fixture";
-import { call, login } from "./helpers";
+import { call, chunkKeyOf, login, readStoredVideo } from "./helpers";
 
 const PART = 5 * 1024 * 1024;
 
@@ -61,8 +61,8 @@ describe("動画アップロード", () => {
     expect(row!.uploadedAt).toBeGreaterThanOrEqual(before);
     expect(row!.expiresAt - row!.uploadedAt).toBe(RETENTION_MS);
     expect(row!.uploadId).toBeNull();
-    const obj = await env.BUCKET.get(`videos/${videoId}/video.mp4`);
-    const stored = new Uint8Array(await obj!.arrayBuffer());
+    // KV に塊で保存されたものをつなげると元のファイルと一致する
+    const stored = (await readStoredVideo(videoId!))!;
     expect(stored.length).toBe(bytes.length);
     expect(await digest(stored)).toBe(await digest(bytes));
   });
@@ -81,7 +81,7 @@ describe("動画アップロード", () => {
       const err = ((await complete!.json()) as { error: { code: string; message: string } }).error;
       expect(err.code).toBe("RESOLUTION_TOO_HIGH");
       expect(err.message).toContain(`${width}×${height}`);
-      expect(await env.BUCKET.head(`videos/${videoId}/video.mp4`)).toBeNull();
+      expect(await env.MEDIA.get(chunkKeyOf(videoId!, 0))).toBeNull();
       const row = await env.DB.prepare("SELECT status, failureReason FROM videos WHERE id = ?1").bind(videoId).first<{ status: string; failureReason: string }>();
       expect(row!.status).toBe("failed");
       expect(row!.failureReason).toContain("720p");
@@ -136,7 +136,7 @@ describe("動画アップロード", () => {
     const del = await call(`/api/admin/videos/${videoId}`, { method: "DELETE", token: admin });
     expect(del.status).toBe(200);
     expect(await env.DB.prepare("SELECT id FROM videos WHERE id = ?1").bind(videoId).first()).toBeNull();
-    expect(await env.BUCKET.head(`videos/${videoId}/video.mp4`)).toBeNull();
+    expect(await env.MEDIA.get(chunkKeyOf(videoId!, 0))).toBeNull();
   });
 
   it("サムネイルは画像の中身を検査して保存する", async () => {
@@ -172,7 +172,7 @@ describe("動画アップロード", () => {
     const { videoId } = await upload(admin, mp4({ width: 640, height: 360 }));
     const r = (await (await call(`/api/admin/videos/${videoId}/inspect`, { method: "POST", token: admin })).json()) as { ok: boolean };
     expect(r.ok).toBe(true);
-    await env.BUCKET.delete(`videos/${videoId}/video.mp4`);
+    await env.MEDIA.delete(chunkKeyOf(videoId!, 0));
     const r2 = (await (await call(`/api/admin/videos/${videoId}/inspect`, { method: "POST", token: admin })).json()) as { ok: boolean };
     expect(r2.ok).toBe(false);
   });
@@ -184,7 +184,7 @@ describe("自動変換に関するサーバー側の保証", () => {
     const bytes = mp4({ width: 1920, height: 1080 });
     const { complete, videoId } = await upload(admin, bytes, { source: { width: 1920, height: 1080, codec: "h264", transcoded: true } });
     expect(complete!.status).toBe(422);
-    expect(await env.BUCKET.head(`videos/${videoId}/video.mp4`)).toBeNull();
+    expect(await env.MEDIA.get(chunkKeyOf(videoId!, 0))).toBeNull();
     const row = await env.DB.prepare("SELECT status FROM videos WHERE id = ?1").bind(videoId).first<{ status: string }>();
     expect(row!.status).toBe("failed");
     // 公開されない
