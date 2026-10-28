@@ -10,8 +10,10 @@ export interface VideoRow {
   title: string;
   description: string;
   category: string;
-  r2Key: string;
+  /** KV のキーの接頭辞（v/<id>）。塊は <接頭辞>/c/<番号> */
+  storageKey: string;
   thumbnailKey: string | null;
+  thumbnailBytes: number;
   durationSeconds: number | null;
   width: number | null;
   height: number | null;
@@ -167,20 +169,6 @@ export async function commentCounts(db: D1Database, ids: string[], includeHidden
     .all<{ videoId: string; n: number }>();
   for (const r of res.results) map.set(r.videoId, r.n);
   return map;
-}
-
-export function videoKey(id: string): string {
-  return `videos/${id}/video.mp4`;
-}
-
-export function thumbnailKey(id: string): string {
-  return `videos/${id}/thumbnail`;
-}
-
-/** R2のキーから動画IDを取り出す（videos/{id}/...） */
-export function videoIdFromKey(key: string): string | null {
-  const m = /^videos\/([0-9a-f-]{36})\//.exec(key);
-  return m ? m[1] : null;
 }
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;

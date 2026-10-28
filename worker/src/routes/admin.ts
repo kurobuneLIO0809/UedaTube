@@ -1,22 +1,30 @@
 // 管理者専用API。すべてのハンドラーの先頭で requireSession(..., "admin") を必ず実行する。
 import { ALLOWED_THUMBNAIL_MIME, ALLOWED_VIDEO_MIME, MAX_THUMBNAIL_BYTES } from "../../../shared/constants";
-import { Mp4Error, assertSupportedMp4, parseMp4, type ByteReader } from "../../../shared/mp4";
+import { Mp4Error, assertSupportedMp4, parseMp4 } from "../../../shared/mp4";
 import { validateVideoMeta } from "../../../shared/validation";
 import { requireSession } from "../auth";
-import { STALE_UPLOAD_MS, computeExpiresAt, deleteVideoCompletely, runCleanup } from "../cleanup";
+import { computeExpiresAt, deleteVideoCompletely, runCleanup } from "../cleanup";
 import { getConfig } from "../config";
+import { UUID_RE, adminVideo, commentCounts, getVideo, isExpired, publicComment, type CommentRow, type VideoRow } from "../db";
 import {
-  UUID_RE,
-  adminVideo,
-  commentCounts,
-  getVideo,
-  isExpired,
-  publicComment,
-  thumbnailKey,
-  videoKey,
-  type CommentRow,
-  type VideoRow,
-} from "../db";
+  ChunkNotReadyError,
+  STALE_UPLOAD_MS,
+  chunkCount,
+  chunkKey,
+  chunkLength,
+  chunkedReader,
+  deleteKeys,
+  hasOpBudget,
+  opsToday,
+  pendingChunkWrites,
+  putChunk,
+  recordOps,
+  requireOpBudget,
+  storagePrefix,
+  storageUsage,
+  thumbKey,
+  thumbTtlSeconds,
+} from "../storage";
 import { HttpError, json, readJson, readLimited } from "../http";
 import type { Ctx } from "../router";
 
@@ -33,27 +41,13 @@ async function requireVideo(ctx: Ctx): Promise<VideoRow> {
   return v;
 }
 
-function partCount(v: Pick<VideoRow, "fileSize" | "partSize">): number {
-  return Math.ceil(v.fileSize / v.partSize);
+function formatMb(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`;
 }
 
-function expectedPartLength(v: Pick<VideoRow, "fileSize" | "partSize">, n: number): number {
-  const total = partCount(v);
-  return n < total ? v.partSize : v.fileSize - v.partSize * (total - 1);
-}
-
-/** R2オブジェクトを範囲読み込みする ByteReader */
-function r2Reader(bucket: R2Bucket, key: string, size: number): ByteReader {
-  return {
-    size,
-    async read(offset, length) {
-      const len = Math.max(0, Math.min(length, size - offset));
-      if (len === 0) return new Uint8Array();
-      const obj = await bucket.get(key, { range: { offset, length: len } });
-      if (!obj) throw new Mp4Error("CORRUPT", "動画ファイルを読み込めませんでした。");
-      return new Uint8Array(await obj.arrayBuffer());
-    },
-  };
+/** KV への保存がまだ反映されていない場合の応答（数秒後の再試行で解決する） */
+function notReady(): HttpError {
+  return new HttpError(503, "NOT_READY", "保存した動画の反映を待っています。数秒後に再試行してください。", undefined, { "Retry-After": "3" });
 }
 
 /** 同時に進行できるアップロード（status = 'uploading'）の上限 */
@@ -85,7 +79,10 @@ function parseSource(raw: unknown, errors: string[]) {
   return out;
 }
 
-/** POST /api/admin/videos アップロードの開始（R2マルチパートアップロードを作成） */
+/**
+ * POST /api/admin/videos アップロードの開始。
+ * KV の容量（合計の上限）と今日の書き込み回数に余裕があるかを先に確かめ、動画の大きさ分を予約する。
+ */
 export async function createUpload(ctx: Ctx): Promise<Response> {
   await admin(ctx);
   const { env, now } = ctx;
@@ -118,12 +115,27 @@ export async function createUpload(ctx: Ctx): Promise<Response> {
     );
   }
 
+  // KV の容量（合計）の確認。アップロード中の動画の予約分も含める
+  const used = await storageUsage(env.DB);
+  const size = fileSize as number;
+  if (used + size > cfg.kvStorageLimitBytes) {
+    throw new HttpError(
+      507,
+      "STORAGE_FULL",
+      `動画の保存領域が足りません（使用中 ${formatMb(used)} / 上限 ${formatMb(cfg.kvStorageLimitBytes)}、この動画 ${formatMb(size)}）。` +
+        "古い動画を削除するか、14日後の自動削除を待ってください。",
+    );
+  }
+  // 今日の KV 書き込み回数の確認（塊の数＋サムネイル1回。進行中のアップロードの残りも含める）
+  const chunks = chunkCount({ fileSize: size, partSize: cfg.uploadPartBytes });
+  const pending = await pendingChunkWrites(env.DB, now);
+  await requireOpBudget(env, "write", pending + chunks + 1, now);
+
   const id = crypto.randomUUID();
-  const key = videoKey(id);
-  const upload = await env.BUCKET.createMultipartUpload(key, { httpMetadata: { contentType: ALLOWED_VIDEO_MIME } });
-  try {
+  const key = storagePrefix(id);
+  {
     await env.DB.prepare(
-      `INSERT INTO videos (id, title, description, category, r2Key, fileSize, contentType, uploadId, partSize,
+      `INSERT INTO videos (id, title, description, category, storageKey, fileSize, contentType, uploadId, partSize,
          createdAt, status, publishOnComplete, commentsEnabled, updatedAt, sourceWidth, sourceHeight, sourceCodec, transcoded)
        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, 'uploading', ?11, 1, ?10, ?12, ?13, ?14, ?15)`,
     )
@@ -135,7 +147,7 @@ export async function createUpload(ctx: Ctx): Promise<Response> {
         key,
         fileSize,
         ALLOWED_VIDEO_MIME,
-        upload.uploadId,
+        null,
         cfg.uploadPartBytes,
         now,
         publish ? 1 : 0,
@@ -145,90 +157,89 @@ export async function createUpload(ctx: Ctx): Promise<Response> {
         source.transcoded ? 1 : 0,
       )
       .run();
-  } catch (err) {
-    // D1への登録に失敗した場合はR2側を中止して孤立させない
-    await upload.abort().catch(() => undefined);
-    throw err;
   }
-  const v = { fileSize: fileSize as number, partSize: cfg.uploadPartBytes };
-  return json({ videoId: id, partSize: cfg.uploadPartBytes, partCount: partCount(v) }, 201);
+  return json({ videoId: id, partSize: cfg.uploadPartBytes, partCount: chunks }, 201);
 }
 
-/** PUT /api/admin/videos/:id/parts/:part 分割アップロードの1パート */
+/** PUT /api/admin/videos/:id/parts/:part 分割アップロードの1パート（＝KV に保存する塊1つ） */
 export async function uploadPart(ctx: Ctx): Promise<Response> {
   await admin(ctx);
   const v = await requireVideo(ctx);
-  if (v.status !== "uploading" || !v.uploadId) throw new HttpError(409, "NOT_UPLOADING", "この動画はアップロード中ではありません。");
+  if (v.status !== "uploading") throw new HttpError(409, "NOT_UPLOADING", "この動画はアップロード中ではありません。");
   const n = Number(ctx.params.part);
-  if (!Number.isInteger(n) || n < 1 || n > partCount(v)) throw new HttpError(400, "INVALID_PART", "パート番号が不正です。");
-  const expected = expectedPartLength(v, n);
+  if (!Number.isInteger(n) || n < 1 || n > chunkCount(v)) throw new HttpError(400, "INVALID_PART", "パート番号が不正です。");
+  const idx = n - 1;
+  const expected = chunkLength(v, idx);
   const declared = Number(ctx.request.headers.get("Content-Length"));
   if (!ctx.request.body || declared !== expected) {
     throw new HttpError(400, "INVALID_PART_SIZE", `パートの大きさが不正です（期待値 ${expected} バイト）。`);
   }
-  const upload = ctx.env.BUCKET.resumeMultipartUpload(v.r2Key, v.uploadId);
-  // 長さが確定したストリームとしてR2に渡す（本文をメモリに溜めない）
-  const body =
-    typeof FixedLengthStream === "function"
-      ? ctx.request.body.pipeThrough(new FixedLengthStream(expected))
-      : ctx.request.body;
+  // 上限ぎりぎりでの書き込みを防ぐ（createUpload で予約済みだが、他の操作で使われた場合に備える）
+  await requireOpBudget(ctx.env, "write", 1, ctx.now);
+  const bytes = await readLimited(ctx.request, expected);
+  if (bytes.byteLength !== expected) {
+    throw new HttpError(400, "INVALID_PART_SIZE", `パートの大きさが不正です（期待値 ${expected} バイト）。`);
+  }
   try {
-    const part = await upload.uploadPart(n, body);
-    return json({ partNumber: part.partNumber, etag: part.etag });
+    await putChunk(ctx.env, v.storageKey, idx, bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer, ctx.now);
   } catch (err) {
     console.warn(JSON.stringify({ event: "upload_part_failed", videoId: v.id, part: n, error: String(err).slice(0, 200) }));
-    throw new HttpError(502, "PART_FAILED", "パートのアップロードに失敗しました。再試行してください。");
+    throw new HttpError(502, "PART_FAILED", "パートの保存に失敗しました。再試行してください。");
   }
+  await ctx.env.DB.prepare(
+    "INSERT INTO video_chunks (videoId, idx, size) VALUES (?1, ?2, ?3) ON CONFLICT (videoId, idx) DO UPDATE SET size = ?3",
+  )
+    .bind(v.id, idx, expected)
+    .run();
+  return json({ partNumber: n, etag: `${v.id}-${idx}` });
 }
 
+/** 不正な動画は KV から削除し（回数に余裕があれば）、失敗理由だけを D1 に残す（行は24時間後に定期処理で削除） */
 async function markFailed(ctx: Ctx, v: VideoRow, reason: string): Promise<void> {
-  // 不正な動画はR2から即座に削除し、失敗理由だけをD1に残す（行は24時間後に定期処理で削除）
-  await ctx.env.BUCKET.delete(v.r2Key).catch(() => undefined);
+  const chunks = await ctx.env.DB.prepare("SELECT idx FROM video_chunks WHERE videoId = ?1").bind(v.id).all<{ idx: number }>();
+  const keys = chunks.results.map((c) => chunkKey(v.storageKey, c.idx));
+  if (keys.length && (await hasOpBudget(ctx.env, "delete", keys.length, ctx.now))) {
+    try {
+      await deleteKeys(ctx.env, keys, ctx.now);
+      await ctx.env.DB.prepare("DELETE FROM video_chunks WHERE videoId = ?1").bind(v.id).run();
+    } catch {
+      // 残った塊は定期処理（または KV の有効期限）で削除される
+    }
+  }
   await ctx.env.DB.prepare("UPDATE videos SET status = 'failed', uploadId = NULL, failureReason = ?2, updatedAt = ?3 WHERE id = ?1")
     .bind(v.id, reason.slice(0, 500), ctx.now)
     .run();
 }
 
-/** POST /api/admin/videos/:id/complete 全パートの結合とMP4の検査 */
+/** POST /api/admin/videos/:id/complete 全パートがそろったか確認し、MP4 を検査して公開する */
 export async function completeUpload(ctx: Ctx): Promise<Response> {
   await admin(ctx);
   const v = await requireVideo(ctx);
-  if (v.status !== "uploading" || !v.uploadId) throw new HttpError(409, "NOT_UPLOADING", "この動画はアップロード中ではありません。");
-  const body = (await readJson(ctx.request, 512 * 1024)) as { parts?: unknown };
-  const total = partCount(v);
-  const parts = body.parts;
-  if (
-    !Array.isArray(parts) ||
-    parts.length !== total ||
-    !parts.every(
-      (p, i) =>
-        typeof p === "object" && p !== null && (p as R2UploadedPart).partNumber === i + 1 && typeof (p as R2UploadedPart).etag === "string",
-    )
-  ) {
-    throw new HttpError(400, "INVALID_PARTS", "パートの一覧が不正です。");
+  if (v.status !== "uploading") throw new HttpError(409, "NOT_UPLOADING", "この動画はアップロード中ではありません。");
+  // 本文（パートの一覧）は互換のため受け取るが、そろっているかは D1 の記録で判定する
+  await readJson(ctx.request, 512 * 1024).catch(() => undefined);
+  const total = chunkCount(v);
+  const got = await ctx.env.DB.prepare("SELECT idx, size FROM video_chunks WHERE videoId = ?1 ORDER BY idx")
+    .bind(v.id)
+    .all<{ idx: number; size: number }>();
+  const have = new Set(got.results.map((c) => c.idx));
+  const missing = Array.from({ length: total }, (_, i) => i).filter((i) => !have.has(i));
+  if (missing.length) {
+    throw new HttpError(400, "MISSING_PARTS", `まだ届いていないパートがあります（${missing.slice(0, 5).map((i) => i + 1).join(", ")}${missing.length > 5 ? " ほか" : ""}）。`);
   }
-
-  try {
-    await ctx.env.BUCKET.resumeMultipartUpload(v.r2Key, v.uploadId).complete(
-      (parts as R2UploadedPart[]).map((p) => ({ partNumber: p.partNumber, etag: p.etag })),
-    );
-  } catch (err) {
-    console.warn(JSON.stringify({ event: "upload_complete_failed", videoId: v.id, error: String(err).slice(0, 200) }));
-    throw new HttpError(502, "COMPLETE_FAILED", "動画ファイルの結合に失敗しました。再試行してください。");
-  }
-
-  const head = await ctx.env.BUCKET.head(v.r2Key);
-  if (!head || head.size !== v.fileSize) {
+  const sum = got.results.reduce((a, c) => a + c.size, 0);
+  if (sum !== v.fileSize) {
     await markFailed(ctx, v, "アップロードされたファイルのサイズが一致しません。");
     throw new HttpError(422, "SIZE_MISMATCH", "アップロードされたファイルのサイズが一致しません。");
   }
 
-  // サーバー側でもMP4の形式・解像度・コーデックを検査する（ブラウザの検査は信用しない）
+  // サーバー側でも MP4 の形式・解像度・コーデックを検査する（ブラウザの検査は信用しない）
   let info;
   try {
-    info = await parseMp4(r2Reader(ctx.env.BUCKET, v.r2Key, head.size));
+    info = await parseMp4(chunkedReader(ctx.env, v));
     assertSupportedMp4(info);
   } catch (err) {
+    if (err instanceof ChunkNotReadyError) throw notReady();
     const message = err instanceof Mp4Error ? err.message : "動画ファイルを解析できませんでした。";
     await markFailed(ctx, v, message);
     throw new HttpError(422, err instanceof Mp4Error ? err.code : "INVALID_VIDEO", message);
@@ -328,16 +339,26 @@ export async function putThumbnail(ctx: Ctx): Promise<Response> {
   const bytes = await readLimited(ctx.request, MAX_THUMBNAIL_BYTES);
   const actual = detectImageType(bytes);
   if (!actual || actual !== ct) throw new HttpError(415, "UNSUPPORTED_MEDIA_TYPE", "画像ファイルの内容が形式と一致しません。");
-  const key = thumbnailKey(v.id);
-  await ctx.env.BUCKET.put(key, bytes, { httpMetadata: { contentType: actual } });
+  const cfg = getConfig(ctx.env);
+  const used = await storageUsage(ctx.env.DB);
+  if (used - v.thumbnailBytes + bytes.byteLength > cfg.kvStorageLimitBytes) {
+    throw new HttpError(507, "STORAGE_FULL", "動画の保存領域が足りないため、サムネイルを保存できません。");
+  }
+  await requireOpBudget(ctx.env, "write", 1, ctx.now);
+  const key = thumbKey(v.storageKey);
+  await ctx.env.MEDIA.put(key, bytes, {
+    expirationTtl: thumbTtlSeconds(v.expiresAt, ctx.now),
+    metadata: { t: ctx.now, ct: actual },
+  });
+  await recordOps(ctx.env.DB, "write", 1, ctx.now);
   const res = await ctx.env.DB.prepare(
-    "UPDATE videos SET thumbnailKey = ?2, updatedAt = ?3 WHERE id = ?1 AND status IN ('uploading', 'published', 'hidden')",
+    "UPDATE videos SET thumbnailKey = ?2, thumbnailBytes = ?3, updatedAt = ?4 WHERE id = ?1 AND status IN ('uploading', 'published', 'hidden')",
   )
-    .bind(v.id, key, ctx.now)
+    .bind(v.id, key, bytes.byteLength, ctx.now)
     .run();
   if (!res.meta.changes) {
     // 途中で削除された場合はサムネイルも消して孤立させない
-    await ctx.env.BUCKET.delete(key);
+    await deleteKeys(ctx.env, [key], ctx.now).catch(() => undefined);
     throw new HttpError(409, "NOT_EDITABLE", "この動画にはサムネイルを設定できません。");
   }
   return json({ ok: true });
@@ -348,17 +369,33 @@ export async function inspectVideo(ctx: Ctx): Promise<Response> {
   await admin(ctx);
   const v = await requireVideo(ctx);
   const checks: { name: string; ok: boolean; message: string }[] = [];
-  const head = await ctx.env.BUCKET.head(v.r2Key);
-  checks.push({ name: "file", ok: !!head, message: head ? "R2に動画ファイルがあります。" : "R2に動画ファイルがありません。" });
-  if (head) {
-    const sizeOk = head.size === v.fileSize;
-    checks.push({ name: "size", ok: sizeOk, message: sizeOk ? `サイズ一致（${head.size} バイト）` : `サイズ不一致（記録 ${v.fileSize} / 実際 ${head.size}）` });
+  const total = chunkCount(v);
+  // KV の一覧取得は1日の回数制限が厳しいため、塊は D1 の記録と KV からの実際の読み込みで確認する
+  const recorded = await ctx.env.DB.prepare("SELECT COUNT(*) AS n, COALESCE(SUM(size), 0) AS bytes FROM video_chunks WHERE videoId = ?1")
+    .bind(v.id)
+    .first<{ n: number; bytes: number }>();
+  const complete = recorded?.n === total && recorded.bytes === v.fileSize;
+  checks.push({
+    name: "chunks",
+    ok: complete,
+    message: complete ? `保存されている塊：${total}個（${v.fileSize} バイト）` : `塊がそろっていません（記録 ${recorded?.n ?? 0} / 必要 ${total}）`,
+  });
+  if (complete) {
     try {
-      const info = await parseMp4(r2Reader(ctx.env.BUCKET, v.r2Key, head.size));
+      const info = await parseMp4(chunkedReader(ctx.env, v));
       assertSupportedMp4(info);
       checks.push({ name: "mp4", ok: true, message: `MP4 ${info.videoCodec} ${info.width}×${info.height} / ${info.durationSeconds.toFixed(1)}秒` });
     } catch (err) {
-      checks.push({ name: "mp4", ok: false, message: err instanceof Mp4Error ? err.message : "解析できませんでした。" });
+      checks.push({
+        name: "mp4",
+        ok: false,
+        message:
+          err instanceof ChunkNotReadyError
+            ? `KV に塊 ${err.idx + 1} が見つかりません（保存直後なら数秒後に再検査してください）。`
+            : err instanceof Mp4Error
+              ? err.message
+              : "解析できませんでした。",
+      });
     }
   }
   const expired = isExpired(v, ctx.now);
@@ -427,13 +464,12 @@ export async function dashboard(ctx: Ctx): Promise<Response> {
   await admin(ctx);
   const { DB } = ctx.env;
   const now = ctx.now;
-  const [byStatus, comments, storage, expiringSoon, failed, runs] = await DB.batch([
+  const [byStatus, comments, expiringSoon, failed, runs] = await DB.batch([
     DB.prepare(
       `SELECT CASE WHEN status IN ('published','hidden') AND expiresAt <= ?1 THEN 'expired' ELSE status END AS status,
               COUNT(*) AS n FROM videos GROUP BY 1`,
     ).bind(now),
     DB.prepare("SELECT COUNT(*) AS n, SUM(hidden) AS hidden FROM comments"),
-    DB.prepare("SELECT COALESCE(SUM(fileSize), 0) AS bytes FROM videos WHERE status IN ('published','hidden')"),
     DB.prepare(
       "SELECT id, title, expiresAt FROM videos WHERE status IN ('published','hidden') AND expiresAt > ?1 AND expiresAt <= ?2 ORDER BY expiresAt LIMIT 20",
     ).bind(now, now + 2 * 24 * 60 * 60 * 1000),
@@ -446,11 +482,22 @@ export async function dashboard(ctx: Ctx): Promise<Response> {
   const statusCounts: Record<string, number> = {};
   for (const r of byStatus.results as { status: string; n: number }[]) statusCounts[r.status] = r.n;
   const c = (comments.results[0] ?? {}) as { n?: number; hidden?: number };
+  const cfg = getConfig(ctx.env);
+  const usedBytes = await storageUsage(DB);
+  const ops = await opsToday(DB, now);
   return json({
     now: iso(now),
     videos: statusCounts,
     comments: { total: c.n ?? 0, hidden: c.hidden ?? 0 },
-    storageBytes: (storage.results[0] as { bytes: number } | undefined)?.bytes ?? 0,
+    storageBytes: usedBytes,
+    // 動画の保存領域（Workers KV 無料プラン）の使用状況
+    kv: {
+      usedBytes,
+      limitBytes: cfg.kvStorageLimitBytes,
+      opsToday: ops,
+      opsLimits: cfg.kvDailyLimits,
+      resetsAt: new Date(Date.UTC(new Date(now).getUTCFullYear(), new Date(now).getUTCMonth(), new Date(now).getUTCDate() + 1)).toISOString(),
+    },
     expiringSoon: (expiringSoon.results as { id: string; title: string; expiresAt: number }[]).map((r) => ({
       ...r,
       expiresAt: iso(r.expiresAt),
@@ -464,7 +511,12 @@ export async function dashboard(ctx: Ctx): Promise<Response> {
       ranAt: iso(r.ranAt),
       errors: r.errors ? (JSON.parse(r.errors) as string[]) : [],
     })),
-    limits: { maxUploadBytes: getConfig(ctx.env).maxUploadBytes, partSize: getConfig(ctx.env).uploadPartBytes },
+    limits: {
+      maxUploadBytes: cfg.maxUploadBytes,
+      partSize: cfg.uploadPartBytes,
+      // 今アップロードできる最大の大きさ（容量の残りと1本の上限の小さい方）
+      availableBytes: Math.max(0, Math.min(cfg.maxUploadBytes, cfg.kvStorageLimitBytes - usedBytes)),
+    },
   });
 }
 

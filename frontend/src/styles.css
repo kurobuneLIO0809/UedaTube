@@ -1206,3 +1206,15 @@ input[type="checkbox"] {
     animation: none;
   }
 }
+
+/* ---------- 保存領域の使用状況 ---------- */
+.usage {
+  margin-bottom: 10px;
+}
+.usage .progress {
+  height: 10px;
+  margin-top: 4px;
+}
+.progress-bar.danger {
+  background: var(--danger);
+}

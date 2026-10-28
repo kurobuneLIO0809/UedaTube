@@ -135,13 +135,23 @@ export class VideoUpload {
       }
 
       this.emit({ phase: "finishing", loaded: this.file.size, message: "サーバーで動画を検査しています…" });
-      await request("/api/admin/videos/" + this.videoId + "/complete", {
-        method: "POST",
-        auth: "admin",
-        json: { parts: this.parts },
-        signal,
-        timeoutMs: 120_000,
-      });
+      // 保存直後は KV への反映待ち（503 NOT_READY）になることがあるので、少し待って再試行する
+      for (let attempt = 0; ; attempt++) {
+        try {
+          await request("/api/admin/videos/" + this.videoId + "/complete", {
+            method: "POST",
+            auth: "admin",
+            json: { parts: this.parts },
+            signal,
+            timeoutMs: 120_000,
+          });
+          break;
+        } catch (err) {
+          if (!(err instanceof ApiError) || err.code !== "NOT_READY" || attempt >= 5) throw err;
+          this.emit({ message: "保存した動画の反映を待っています…" });
+          await sleep(3000, signal);
+        }
+      }
 
       if (this.thumbnail) {
         this.emit({ phase: "thumbnail", message: "サムネイルを登録しています…" });

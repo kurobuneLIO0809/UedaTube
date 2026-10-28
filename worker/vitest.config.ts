@@ -19,6 +19,7 @@ export default defineConfig(async () => {
             ALLOWED_ORIGINS: "https://example.github.io,http://localhost:5173",
             UPLOAD_PART_BYTES: String(5 * 1024 * 1024),
             MAX_UPLOAD_BYTES: String(64 * 1024 * 1024),
+            KV_STORAGE_LIMIT_BYTES: String(512 * 1024 * 1024),
           },
         },
       }),

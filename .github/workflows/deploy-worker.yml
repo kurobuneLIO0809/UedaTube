@@ -1,9 +1,11 @@
 # Cloudflare Worker（School NICO の API）を GitHub Actions からデプロイします。手動実行のみ。
 #
 # 事前に GitHub の Settings → Secrets and variables → Actions で次を登録してください。
-#   Secrets   : CLOUDFLARE_API_TOKEN   （Workers・D1・R2 を編集できる Cloudflare API トークン）
+#   Secrets   : CLOUDFLARE_API_TOKEN   （Workers Scripts・Workers KV Storage・D1 を編集できる Cloudflare API トークン）
 #               CLOUDFLARE_ACCOUNT_ID  （Cloudflare のアカウントID）
-#   Variables : CLOUDFLARE_D1_DATABASE_ID（D1「school-nico-db」の Database ID。秘密情報ではない）
+#   Variables : CLOUDFLARE_D1_DATABASE_ID （D1「school-nico-db」の Database ID。秘密情報ではない）
+#               CLOUDFLARE_KV_NAMESPACE_ID（動画を保存する KV 名前空間の ID。秘密情報ではない）
+# R2 は使いません（有効化に支払い方法の登録が必要なため）。動画は Workers KV（無料プラン）に保存します。
 #
 # 合言葉・署名鍵（VIEWER_PASSPHRASE / ADMIN_PASSPHRASE / SESSION_SECRET）はこのワークフローでは扱いません。
 # 初回デプロイ後に Cloudflare 管理画面で Secret として登録します（README「9. Workers Secrets の設定」）。
@@ -53,24 +55,27 @@ jobs:
       - name: 3. テスト（失敗したらデプロイしない）
         run: npm test
 
-      - name: 4. D1 の Database ID を設定（作業コピーのみ変更）
+      - name: 4. D1 の Database ID と KV の Namespace ID を設定（作業コピーのみ変更）
         env:
           D1_DATABASE_ID: ${{ vars.CLOUDFLARE_D1_DATABASE_ID }}
-        run: node scripts/set-d1-database-id.mjs
+          KV_NAMESPACE_ID: ${{ vars.CLOUDFLARE_KV_NAMESPACE_ID }}
+        run: node scripts/set-resource-ids.mjs
 
-      - name: 5. R2 バケットが存在するか確認
+      - name: 5. KV 名前空間が存在するか確認
+        env:
+          KV_NAMESPACE_ID: ${{ vars.CLOUDFLARE_KV_NAMESPACE_ID }}
         run: |
-          bucket=$(node -e "const t=require('fs').readFileSync('wrangler.jsonc','utf8');const m=t.match(/\"bucket_name\"\s*:\s*\"([^\"]+)\"/);if(!m)process.exit(1);console.log(m[1])")
-          echo "R2 バケット: $bucket"
-          if ! npx wrangler r2 bucket info "$bucket" > /dev/null; then
-            echo "::error::R2 バケット「$bucket」が見つかりません。Cloudflare 管理画面の R2 で同じ名前のバケットを作成してください（公開アクセスは無効のまま）。"
+          npx wrangler kv namespace list > "$RUNNER_TEMP/kv.json"
+          if ! node -e "const l=JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'));process.exit(l.some(n=>n.id.toLowerCase()===process.env.KV_NAMESPACE_ID.trim().toLowerCase())?0:1)" "$RUNNER_TEMP/kv.json"; then
+            echo "::error::CLOUDFLARE_KV_NAMESPACE_ID の KV 名前空間が見つかりません。Cloudflare の「Workers KV」で作成した名前空間の ID か、API トークンの KV 権限を確認してください。"
             exit 1
           fi
+          echo "KV 名前空間を確認しました。"
 
       - name: 6. D1 マイグレーション（テーブルの作成・更新）
         run: npx wrangler d1 migrations apply school-nico-db --remote
 
-      - name: 7. Worker のデプロイ（R2・D1 のバインディングと Cron Trigger を含む）
+      - name: 7. Worker のデプロイ（KV・D1 のバインディングと Cron Trigger を含む）
         run: npx wrangler deploy
 
       - name: 8. 次の作業の案内

@@ -105,7 +105,8 @@ function decodesCleanly(path: string): boolean {
 const testsrc = (size: string, seconds = 2) => ["-f", "lavfi", "-i", `testsrc2=size=${size}:rate=30`, "-t", String(seconds)];
 const tone = ["-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000", "-shortest"];
 
-describe.skipIf(!hasFfmpeg)("実際の FFmpeg による変換（ブラウザと同じ引数）", () => {
+// 実際にエンコードするため、既定の5秒では足りないことがある（特に VP9 の作成）
+describe.skipIf(!hasFfmpeg)("実際の FFmpeg による変換（ブラウザと同じ引数）", { timeout: 60_000 }, () => {
   it("1080p 横長の H.264 を 1280×720 の H.264/AAC MP4 に変換する", async () => {
     const input = makeInput("land.mp4", [...testsrc("1920x1080"), ...tone, "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac"]);
     const r = transcode(input, "land-out.mp4");

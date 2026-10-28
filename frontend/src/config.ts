@@ -13,8 +13,8 @@ export const config = {
   siteName: import.meta.env.VITE_SITE_NAME || "School NICO",
   apiBaseUrl: (import.meta.env.VITE_API_BASE_URL || "http://localhost:8787").replace(/\/+$/, ""),
   categories: list(import.meta.env.VITE_CATEGORIES, ["授業", "行事", "部活動", "お知らせ", "その他"]),
-  /** 他の人のコメントを取り込む間隔 */
-  commentPollMs: 10_000,
+  /** 他の人のコメントを取り込む間隔（Workers 無料プランの1日10万リクエストを節約するため15秒） */
+  commentPollMs: 15_000,
   /** コメント全件を取り直す間隔（管理者の削除・非表示を反映するため） */
   commentFullRefreshMs: 60_000,
   /** 履歴パネルの1ページあたりの件数 */

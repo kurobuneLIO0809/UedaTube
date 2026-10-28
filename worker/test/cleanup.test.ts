@@ -6,7 +6,7 @@ import worker from "../src/index";
 import { ORPHAN_GRACE_MS, STALE_UPLOAD_MS, runCleanup } from "../src/cleanup";
 import type { Env } from "../src/env";
 import { buildMp4 } from "../../shared/testing/mp4fixture";
-import { baseComment, call, freshIp, login, seedVideo } from "./helpers";
+import { baseComment, call, chunkKeyOf, freshIp, login, seedVideo, thumbKeyOf } from "./helpers";
 
 async function addComment(videoId: string) {
   const viewer = await login("viewer");
@@ -22,8 +22,8 @@ async function expire(videoId: string) {
 async function exists(videoId: string) {
   const video = await env.DB.prepare("SELECT id FROM videos WHERE id = ?1").bind(videoId).first();
   const comments = await env.DB.prepare("SELECT COUNT(*) AS n FROM comments WHERE videoId = ?1").bind(videoId).first<{ n: number }>();
-  const file = await env.BUCKET.head(`videos/${videoId}/video.mp4`);
-  const thumb = await env.BUCKET.head(`videos/${videoId}/thumbnail`);
+  const file = await env.MEDIA.get(chunkKeyOf(videoId, 0), "arrayBuffer");
+  const thumb = await env.MEDIA.get(thumbKeyOf(videoId), "arrayBuffer");
   return { video: !!video, comments: comments?.n ?? 0, file: !!file, thumb: !!thumb };
 }
 
@@ -57,17 +57,17 @@ describe("14日後の自動削除（Cron Trigger）", () => {
     await addComment(v.id);
     await expire(v.id);
 
-    // R2の削除が一時的に失敗する環境
-    const failingBucket = new Proxy(env.BUCKET, {
+    // KV の削除が一時的に失敗する環境
+    const failingKv = new Proxy(env.MEDIA, {
       get(target, prop, receiver) {
-        if (prop === "delete") return async () => { throw new Error("R2 temporarily unavailable"); };
+        if (prop === "delete") return async () => { throw new Error("KV temporarily unavailable"); };
         const value = Reflect.get(target, prop, receiver);
         return typeof value === "function" ? value.bind(target) : value;
       },
     });
-    const first = await runCleanup({ ...env, BUCKET: failingBucket } as Env, Date.now());
+    const first = await runCleanup({ ...env, MEDIA: failingKv } as Env, Date.now());
     expect(first.failedVideos).toBeGreaterThanOrEqual(1);
-    expect(first.errors.join("\n")).toContain("R2 temporarily unavailable");
+    expect(first.errors.join("\n")).toContain("KV temporarily unavailable");
     const row = await env.DB.prepare("SELECT status, deleteAttempts, lastDeleteError FROM videos WHERE id = ?1").bind(v.id).first<{ status: string; deleteAttempts: number; lastDeleteError: string }>();
     expect(row).toMatchObject({ status: "deleting", deleteAttempts: 1 });
 
@@ -84,7 +84,8 @@ describe("14日後の自動削除（Cron Trigger）", () => {
   it("既に削除済みのファイルがあっても処理全体は失敗しない", async () => {
     const v = await seedVideo({ thumbnail: true });
     await expire(v.id);
-    await env.BUCKET.delete([`videos/${v.id}/video.mp4`, `videos/${v.id}/thumbnail`]);
+    await env.MEDIA.delete(chunkKeyOf(v.id, 0));
+    await env.MEDIA.delete(thumbKeyOf(v.id));
     const summary = await runCleanup(env, Date.now());
     expect(summary.failedVideos).toBe(0);
     expect(await exists(v.id)).toMatchObject({ video: false });
@@ -104,14 +105,15 @@ describe("14日後の自動削除（Cron Trigger）", () => {
     expect((await exists(videoId)).video).toBe(false);
   });
 
-  it("D1に対応する動画が無いR2の孤立ファイルを削除する", async () => {
+  it("D1に対応する動画が無いKVの孤立ファイルを削除する", async () => {
     const orphanId = crypto.randomUUID();
-    await env.BUCKET.put(`videos/${orphanId}/video.mp4`, new Uint8Array([1, 2, 3]));
+    await env.MEDIA.put(chunkKeyOf(orphanId, 0), new Uint8Array([1, 2, 3]), { metadata: { t: Date.now() } });
     const v = await seedVideo();
+    await env.DB.prepare("DELETE FROM meta WHERE key IN ('orphan_last_sweep', 'orphan_cursor')").run();
     await runCleanup(env, Date.now() + ORPHAN_GRACE_MS + 1000);
-    expect(await env.BUCKET.head(`videos/${orphanId}/video.mp4`)).toBeNull();
+    expect(await env.MEDIA.get(chunkKeyOf(orphanId, 0))).toBeNull();
     // D1に存在する動画のファイルは消さない
-    expect(await env.BUCKET.head(`videos/${v.id}/video.mp4`)).not.toBeNull();
+    expect(await env.MEDIA.get(chunkKeyOf(v.id, 0))).not.toBeNull();
   });
 
   it("管理者は手動で動画を削除でき、コメントも削除される", async () => {
@@ -176,8 +178,8 @@ describe("14日後の自動削除（Cron Trigger）", () => {
     await expire(videoId);
     await runCleanup(env, Date.now());
     expect(await exists(videoId)).toEqual({ video: false, comments: 0, file: false, thumb: false });
-    // R2 に元動画などの別ファイルも残っていない
-    const left = await env.BUCKET.list({ prefix: `videos/${videoId}/` });
-    expect(left.objects).toHaveLength(0);
+    // KV に元動画などの別ファイルも残っていない
+    const left = await env.MEDIA.list({ prefix: `v/${videoId}/` });
+    expect(left.keys).toHaveLength(0);
   });
 });

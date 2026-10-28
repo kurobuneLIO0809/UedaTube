@@ -18,6 +18,24 @@ export function statusLabel(v: AdminVideo): string {
   return v.expired && (v.status === "published" || v.status === "hidden") ? STATUS_LABELS.expired : STATUS_LABELS[v.status];
 }
 
+function UsageBar({ label, used, limit, format }: { label: string; used: number; limit: number; format: (n: number) => string }) {
+  const pct = limit > 0 ? Math.min(100, Math.round((used / limit) * 100)) : 0;
+  return (
+    <div className="usage">
+      <div className="row">
+        <span>{label}</span>
+        <span className="spacer" />
+        <span className={pct >= 90 ? "form-error small" : "muted small"}>
+          {format(used)} / {format(limit)}（{pct}%）
+        </span>
+      </div>
+      <div className="progress" role="progressbar" aria-label={label} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
+        <div className={`progress-bar ${pct >= 90 ? "danger" : ""}`} style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
 export function AdminDashboardPage() {
   const [dash, setDash] = useState<Dashboard | null>(null);
   const [videos, setVideos] = useState<AdminVideo[] | null>(null);
@@ -115,10 +133,23 @@ export function AdminDashboardPage() {
           <span>コメント（非表示 {dash.comments.hidden}）</span>
         </div>
         <div className="stat card">
-          <span className="stat-num">{formatBytes(dash.storageBytes)}</span>
-          <span>動画の保存容量</span>
+          <span className="stat-num">{formatBytes(dash.kv.usedBytes)}</span>
+          <span>動画の保存容量（上限 {formatBytes(dash.kv.limitBytes)}）</span>
         </div>
       </div>
+
+      <section className="card" aria-labelledby="kv-title">
+        <h2 id="kv-title" className="section-title">
+          動画の保存領域（Cloudflare Workers KV・無料プラン）
+        </h2>
+        <UsageBar label="保存容量" used={dash.kv.usedBytes} limit={dash.kv.limitBytes} format={formatBytes} />
+        <UsageBar label="今日の書き込み回数" used={dash.kv.opsToday.write} limit={dash.kv.opsLimits.write} format={(n) => `${n}回`} />
+        <UsageBar label="今日の削除回数" used={dash.kv.opsToday.delete} limit={dash.kv.opsLimits.delete} format={(n) => `${n}回`} />
+        <p className="muted small">
+          無料プランの上限（合計1GB、1日あたり書き込み・削除 各1,000回）を超えないよう、手前で受け付けを止めます。上限を超えても料金は発生しません。
+          回数は {formatDateTime(dash.kv.resetsAt)} に戻ります。今アップロードできる大きさ：最大 {formatBytes(dash.limits.availableBytes)}
+        </p>
+      </section>
 
       <div className="admin-grid">
         <section className="card" aria-labelledby="exp-title">

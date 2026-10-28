@@ -19,8 +19,10 @@
     }
   ],
 
-  // R2：動画ファイル本体（非公開バケット。公開URLやカスタムドメインは設定しない）
-  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "school-nico-videos" }],
+  // Workers KV：動画（塊に分割）とサムネイル。無料プラン（合計1GB）で使う。支払い方法の登録は不要。
+  // id はここに直接書かず、GitHub Actions の Variables「CLOUDFLARE_KV_NAMESPACE_ID」の値を
+  // デプロイ時にワークフローが書き込みます。
+  "kv_namespaces": [{ "binding": "MEDIA", "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID" }],
 
   // Cron Trigger：5分ごとに期限切れ動画を削除
   "triggers": { "crons": ["*/5 * * * *"] },
@@ -29,10 +31,16 @@
     // GitHub Pages のオリジン。ブラウザが送るオリジンは小文字なので小文字で書く。複数ある場合はカンマ区切り
     // （ローカル開発では worker/.dev.vars の ALLOWED_ORIGINS で上書きします）
     "ALLOWED_ORIGINS": "https://kurobunelio0809.github.io",
-    // アップロードできる動画の最大サイズ（バイト）。初期値 500MB
-    "MAX_UPLOAD_BYTES": "524288000",
-    // 分割アップロード1回のサイズ（バイト）。5MiB以上・95MiB以下。初期値 10MiB
-    "UPLOAD_PART_BYTES": "10485760",
+    // アップロードできる動画1本の最大サイズ（バイト）。初期値 200MiB
+    "MAX_UPLOAD_BYTES": "209715200",
+    // 分割アップロード1回（＝KV に保存する塊1つ）のサイズ（バイト）。1MiB〜24MiB。初期値 8MiB
+    "UPLOAD_PART_BYTES": "8388608",
+    // KV に保存してよい合計（バイト）。無料プランの上限1GBより少なくする。初期値 900MiB
+    "KV_STORAGE_LIMIT_BYTES": "943718400",
+    // KV の1日あたりの操作回数の上限（無料プランは各1,000回。余裕を残して止める）
+    "KV_DAILY_WRITE_LIMIT": "900",
+    "KV_DAILY_DELETE_LIMIT": "900",
+    "KV_DAILY_LIST_LIMIT": "900",
     "VIEWER_TOKEN_TTL_SECONDS": "28800",
     "ADMIN_TOKEN_TTL_SECONDS": "7200",
     "MEDIA_TOKEN_TTL_SECONDS": "900"
